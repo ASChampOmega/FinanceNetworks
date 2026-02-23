@@ -1,0 +1,23 @@
+Metadata-Version: 2.4
+Name: FinanceNetworks
+Version: 0.1.0
+Summary: A project for ECON 423 Final Project on Finance Networks
+Author: Aaryam Sharma
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.7
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: matplotlib
+Requires-Dist: scipy
+Requires-Dist: yfinance
+Requires-Dist: scikit-learn
+Requires-Dist: arch
+Requires-Dist: tqdm
+Requires-Dist: statsmodels
+Dynamic: author
+Dynamic: classifier
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
