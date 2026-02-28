@@ -11,6 +11,8 @@ evaluation/__init__.py
 evaluation/cross_val.py
 models/__init__.py
 models/baselines.py
+models/correlation_network.py
+models/network_models.py
 visualize/__init__.py
 visualize/data_distribution.py
 visualize/plot_model_results.py

@@ -1,6 +1,7 @@
 ﻿import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import pandas as pd
+import numpy as np
 
 
 def plot_ticker_predictions(
@@ -78,6 +79,94 @@ def plot_summary_metrics(
         ax.set_title(label, fontsize=12, fontweight="bold")
 
     fig.suptitle("Model Comparison Across Tickers & Folds", fontsize=13, fontweight="bold", y=1.01)
+    fig.tight_layout()
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    plt.show()
+
+
+def plot_network_degrees(
+    network,
+    sample_tickers: "list[str] | None" = None,
+    save_path: "str | None" = None,
+):
+    """
+    Plot rolling graph degree over time for a selection of tickers.
+
+    Shows how each stock's connectivity in the correlation network evolves,
+    with the cross-sectional mean degree in the background.  Sharp drops or
+    spikes in connectivity often coincide with volatility regime changes.
+
+    Parameters
+    ----------
+    network       : a fitted FinanceNetworkBase subclass (after fit_transform).
+    sample_tickers: tickers to highlight; defaults to up to 5 tickers.
+    save_path     : if provided, saves the figure to this path.
+    """
+    deg_df = network.snapshot_degrees()  # (n_snapshots x n_tickers)
+
+    if deg_df.empty:
+        print("[plot_network_degrees] No snapshot data available.")
+        return
+
+    # Limit to tickers that have at least some data
+    available = [t for t in (sample_tickers or []) if t in deg_df.columns]
+    if not available:
+        available = deg_df.columns[deg_df.notna().any()].tolist()[:5]
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+
+    # Background: cross-sectional mean degree
+    mean_deg = deg_df.mean(axis=1)
+    ax.fill_between(
+        deg_df.index,
+        mean_deg,
+        alpha=0.12,
+        color="steelblue",
+        label="Cross-sec. mean degree",
+    )
+    ax.plot(deg_df.index, mean_deg, color="steelblue", linewidth=1.0, alpha=0.6)
+
+    # Foreground: per-ticker degree traces
+    colours = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for i, ticker in enumerate(available):
+        series = deg_df[ticker].dropna()
+        ax.plot(
+            series.index,
+            series.values,
+            label=ticker,
+            linewidth=1.5,
+            color=colours[i % len(colours)],
+        )
+
+    # Annotate edge counts on secondary axis
+    edge_counts = network.snapshot_edge_counts()
+    ax2 = ax.twinx()
+    ax2.step(
+        edge_counts.index,
+        edge_counts.values,
+        color="grey",
+        linewidth=0.8,
+        alpha=0.4,
+        where="post",
+        label="Total edges",
+    )
+    ax2.set_ylabel("Total edges in graph", color="grey", fontsize=9)
+    ax2.tick_params(axis="y", colors="grey", labelsize=8)
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax.xaxis.set_major_locator(mdates.YearLocator())
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Node degree")
+    ax.set_title(
+        f"Network Degree Dynamics  [{type(network).__name__}, "
+        f"window={network.window}, {network.graph_type}]",
+        fontsize=12,
+        fontweight="bold",
+    )
+    ax.legend(loc="upper left", fontsize=9)
     fig.tight_layout()
 
     if save_path is not None:

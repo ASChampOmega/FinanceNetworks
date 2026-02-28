@@ -1,4 +1,4 @@
-﻿import pandas as pd
+import pandas as pd
 import numpy as np
 from typing import List, Optional
 
@@ -27,38 +27,91 @@ def add_forward_rv_target_and_past_rv_features(
     df: pd.DataFrame,
     returns_col: str = "Returns",
     horizon: int = 5,
-    eps: float = 1e-12,
+    eps: float = 1e-8,
 ) -> pd.DataFrame:
     """
     Creates:
-      - Y_fwd: sum of squared returns over next horizon days (exclude today, start tomorrow)
-      - RV1: r_t^2
-      - RV5: mean of last 5 squared returns (past)
-      - RV22: mean of last 22 squared returns (past)
-      - logs of all (safe with eps)
+      - Y_fwd          : sum of squared returns over the next *horizon* days
+                         (excludes today, starts tomorrow).  This is the
+                         regression target.
+      - RV1            : r_t^2  -- daily realised variance
+      - RV5            : past 5-day rolling mean of r^2  (weekly component)
+      - RV10           : past 10-day rolling mean of r^2 (bi-weekly component)
+      - RV22           : past 22-day rolling mean of r^2 (monthly component)
+      - neg_semi_var5  : 5-day rolling mean of r^2 where r < 0
+                         (negative semivariance -- captures leverage effect)
+      - pos_semi_var5  : 5-day rolling mean of r^2 where r >= 0
+                         (positive semivariance)
+      - log_*          : natural log of each RV measure + eps for stability.
+                         log_Y is the preferred training target for HAR models.
+
+    Feature alignment:
+      All RV features use *strictly past* data (rolling windows end at t).
+      Y_fwd uses *strictly future* data (r_{t+1}^2 ... r_{t+horizon}^2).
+      => No look-ahead leakage between features and target.
+
+    Scaling:
+      No StandardScaler is applied here.  Fitting a global scaler before
+      cross-validation splits would leak test-period statistics into training
+      features.  Models that need standardised inputs should wrap themselves
+      in a sklearn Pipeline([StandardScaler, regressor]) so the scaler is
+      re-fit on each fold's training data only.
+
+    Index safety:
+      When called via preprocess_data(), ensure_datetime() has already been
+      applied and the index is a DatetimeIndex named "Date".  Calling
+      ensure_datetime() again would raise a KeyError because "Date" is no
+      longer a column.  We therefore only call ensure_datetime() when the
+      index is not already a DatetimeIndex -- safe to call standalone too.
     """
-    df = ensure_datetime(df)
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df = ensure_datetime(df)
+    else:
+        df = df.copy().sort_index()
     out = df.copy()
     r = pd.to_numeric(out[returns_col], errors="coerce")
 
     r2 = r ** 2
-    out["RV1"] = r2
-    out["RV5"] = r2.rolling(5).mean()
+
+    # ── Past RV components (HAR hierarchy) ────────────────────────────────
+    out["RV1"]  = r2
+    out["RV5"]  = r2.rolling(5).mean()
+    out["RV10"] = r2.rolling(10).mean()
     out["RV22"] = r2.rolling(22).mean()
 
-    # Future realized variance over next horizon days (exclude today, start tomorrow)
+    # ── Asymmetric / leverage components ──────────────────────────────────
+    # Negative semivariance: squared returns on down-days only.
+    # Captures the leverage effect (bad-news days drive future vol more than
+    # good-news days of equal magnitude).
+    neg_r2 = r2.where(r < 0, other=0.0)
+    pos_r2 = r2.where(r >= 0, other=0.0)
+    out["neg_semi_var5"] = neg_r2.rolling(5).mean()
+    out["pos_semi_var5"] = pos_r2.rolling(5).mean()
+
+    # ── Forward target ────────────────────────────────────────────────────
+    # Y_fwd_t = r_{t+1}^2 + r_{t+2}^2 + ... + r_{t+horizon}^2
+    # shift(-k) pulls future row k into the current index position, so the
+    # value stored at date t is a pure future quantity.
     y = sum((r.shift(-k) ** 2) for k in range(1, horizon + 1))
     out["Y_fwd"] = y
 
-    # Logs (often better behaved)
-    out["log_RV1"] = np.log(out["RV1"] + eps)
-    out["log_RV5"] = np.log(out["RV5"] + eps)
-    out["log_RV22"] = np.log(out["RV22"] + eps)
-    out["log_Y"] = np.log(out["Y_fwd"] + eps)
+    # ── Log transforms (single eps for consistency) ───────────────────────
+    out["log_RV1"]       = np.log(out["RV1"]          + eps)
+    out["log_RV5"]       = np.log(out["RV5"]          + eps)
+    out["log_RV10"]      = np.log(out["RV10"]         + eps)
+    out["log_RV22"]      = np.log(out["RV22"]         + eps)
+    out["log_neg_semi5"] = np.log(out["neg_semi_var5"] + eps)
+    out["log_pos_semi5"] = np.log(out["pos_semi_var5"] + eps)
+    out["log_Y"]         = np.log(out["Y_fwd"]        + eps)
 
-    # Drop rows that can’t be used (need enough past + enough future)
-    out = out.dropna(subset=["Y_fwd", "RV1", "RV5", "RV22"])
+    # Drop rows that are missing any required feature or the target
+    required = [
+        "Y_fwd", "RV1", "RV5", "RV10", "RV22",
+        "neg_semi_var5", "pos_semi_var5",
+    ]
+    out = out.dropna(subset=required)
     return out
+
 
 def preprocess_data(df: pd.DataFrame, lag_list: Optional[List[int]] = None):
     df = ensure_datetime(df)
@@ -68,7 +121,8 @@ def preprocess_data(df: pd.DataFrame, lag_list: Optional[List[int]] = None):
     df = add_forward_rv_target_and_past_rv_features(df)
     return df
 
-def preprocess(data: dict[str, pd.DataFrame], lag_list: Optional[List[int]] = None, preprocess_func = None):
+
+def preprocess(data: dict, lag_list: Optional[List[int]] = None, preprocess_func=None):
     if preprocess_func is None:
         preprocess_func = preprocess_data
     preprocessed_data = {}
@@ -76,26 +130,21 @@ def preprocess(data: dict[str, pd.DataFrame], lag_list: Optional[List[int]] = No
         preprocessed_data[ticker] = preprocess_func(df, lag_list)
     return preprocessed_data
 
+
 def preprocess_df_for_har(df: pd.DataFrame, lag_list: Optional[List[int]] = None):
-    from sklearn.preprocessing import StandardScaler
+    """
+    Preprocess a single ticker DataFrame for HAR-family models.
+
+    No StandardScaler is applied here; see add_forward_rv_target_and_past_rv_features
+    for the full explanation.  Scaling is handled inside each model Pipeline.
+    """
     df = preprocess_data(df, lag_list=lag_list)
-    df['log_Y'] = np.log(df['Y_fwd'] + 1e-8)
-    df['log_RV1'] = np.log(df['RV1'] + 1e-8)
-    df['log_RV5'] = np.log(df['RV5'] + 1e-8)
-    df['log_RV22'] = np.log(df['RV22'] + 1e-8)
-    # Standardize HAR input features per-ticker for numerical stability.
-    # log_Y and Y_fwd are intentionally left unscaled: log_Y is the training
-    # target (models exp() it back), and Y_fwd is the evaluation target.
-    # Returns is left unscaled so GARCH can work in its natural percentage-return units.
-    har_cols = ['log_RV1', 'log_RV5', 'log_RV22']
     if df.empty or len(df) < 2:
         raise Exception("DataFrame is empty or too small after preprocessing.")
-    scaler = StandardScaler()
-    df[har_cols] = scaler.fit_transform(df[har_cols])
     return df
 
 
-def preprocess_for_har(data: dict[str, pd.DataFrame], lag_list: Optional[List[int]] = None):
+def preprocess_for_har(data: dict, lag_list: Optional[List[int]] = None):
     result = {}
     for ticker, df in data.items():
         try:
@@ -107,6 +156,7 @@ def preprocess_for_har(data: dict[str, pd.DataFrame], lag_list: Optional[List[in
         except Exception as e:
             print(f"[preprocess_for_har] Skipping {ticker}: {e}")
     return result
+
 
 def remove_outliers(
     df: pd.DataFrame,
@@ -121,9 +171,8 @@ def remove_outliers(
     ----------
     df        : DataFrame to filter.
     cols      : Column name or list of column names to check.  Defaults to
-                ["log_RV1", "log_RV5", "log_RV22", "log_Y"] (the HAR
-                feature/target columns).  Only columns that exist in df are
-                used.
+                ["log_RV1", "log_RV5", "log_RV22", "log_Y"].  Only columns
+                that actually exist in df are checked.
     z_thresh  : Rows whose z-score magnitude exceeds this value in *any*
                 of the checked columns are dropped.
     """
@@ -143,4 +192,3 @@ def remove_outliers(
         z_scores = (df[col] - df[col].mean()) / std
         mask &= np.abs(z_scores) < z_thresh
     return df[mask]
-
