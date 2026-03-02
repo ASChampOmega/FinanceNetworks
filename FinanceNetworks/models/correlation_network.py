@@ -221,6 +221,8 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
 
     _GRAPH_BUILDERS = {"threshold", "knn"}
 
+    _IDW_KERNELS = {"inv", "exp"}
+
     def __init__(
         self,
         window: int = 60,
@@ -232,11 +234,18 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
         returns_col: str = "Returns",
         min_obs_frac: float = 0.8,
         min_tickers: int = 10,
+        idw_kernel: str = "inv",
+        exp_lambda: float = 5.0,
     ):
         if graph_type not in self._GRAPH_BUILDERS:
             raise ValueError(
                 f"graph_type must be one of {sorted(self._GRAPH_BUILDERS)}; "
                 f"got '{graph_type}'"
+            )
+        if idw_kernel not in self._IDW_KERNELS:
+            raise ValueError(
+                f"idw_kernel must be one of {sorted(self._IDW_KERNELS)}; "
+                f"got '{idw_kernel}'"
             )
         self.window       = window
         self.step         = step
@@ -247,6 +256,8 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
         self.returns_col  = returns_col
         self.min_obs_frac = min_obs_frac
         self.min_tickers  = min_tickers
+        self.idw_kernel   = idw_kernel
+        self.exp_lambda   = exp_lambda
 
         # Populated by fit()
         self.tickers_: List[str] = []
@@ -254,6 +265,9 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
         # returns ending on rebuild_date[i]; features are forward-filled to the
         # next rebuild date.
         self._snapshots: List[Tuple[pd.Timestamp, nx.Graph]] = []
+        # Per-snapshot mean absolute correlation across all pairs (scalar,
+        # shared across all stocks).  Stored alongside the graph snapshots.
+        self._snap_avg_abs_corr: Dict[pd.Timestamp, float] = {}
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -370,6 +384,14 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
                 dist_df = self._compute_distance_matrix(window_ret)
                 G = self._build_graph(dist_df)
                 self._snapshots.append((date, G))
+                # Mean |correlation| across all unique pairs in this window
+                corr_mat = _safe_corr(window_ret.values.astype(float))
+                n_t = corr_mat.shape[0]
+                if n_t > 1:
+                    upper = np.abs(corr_mat[np.triu_indices(n_t, k=1)])
+                    self._snap_avg_abs_corr[date] = float(upper.mean())
+                else:
+                    self._snap_avg_abs_corr[date] = 0.0
             except Exception as exc:
                 warnings.warn(f"Snapshot at {date.date()} skipped: {exc}")
 
@@ -447,7 +469,9 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
 
         # ── Compute per-snapshot per-ticker feature records ────────────
         all_net_cols = (
-            ["net_degree", "net_degree_change"]
+            ["net_degree", "net_degree_change",
+             "net_node_clustering", "net_global_clustering",
+             "net_avg_abs_corr"]
             + [f"net_idw_{c}" for c in self.feature_cols]
         )
 
@@ -456,6 +480,11 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
 
         for date, G in self._snapshots:
             recs: Dict[str, Dict[str, float]] = {}
+
+            # Graph-level features (shared across all stocks in this snapshot)
+            global_clustering = float(nx.average_clustering(G)) if G.number_of_edges() > 0 else 0.0
+            avg_abs_corr = self._snap_avg_abs_corr.get(date, 0.0)
+            node_clustering = nx.clustering(G)  # dict {node: cc}
 
             for ticker in data_dict:
                 if ticker not in G.nodes:
@@ -477,8 +506,11 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
                 )
 
                 rec: Dict[str, float] = {
-                    "net_degree":        float(deg),
-                    "net_degree_change": deg_change,
+                    "net_degree":            float(deg),
+                    "net_degree_change":     deg_change,
+                    "net_node_clustering":   float(node_clustering.get(ticker, 0.0)),
+                    "net_global_clustering": global_clustering,
+                    "net_avg_abs_corr":      avg_abs_corr,
                 }
 
                 neighbours = list(G.neighbors(ticker))
@@ -496,9 +528,12 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
                         if not pd.notna(val):
                             continue
                         raw_w = G[ticker][nb].get("weight", 1.0)
-                        inv_w = 1.0 / max(raw_w, 1e-8)
+                        if self.idw_kernel == "exp":
+                            w = np.exp(-self.exp_lambda * raw_w)
+                        else:
+                            w = 1.0 / max(raw_w, 1e-8)
                         vals.append(float(val))
-                        weights.append(inv_w)
+                        weights.append(w)
 
                     if vals:
                         w_arr = np.array(weights)

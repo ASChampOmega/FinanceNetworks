@@ -75,6 +75,16 @@ NET_FEATURES: List[str] = [
     "net_idw_log_RV22",
 ]
 
+# Extended network features (clustering + market-wide connectivity)
+CLUSTERING_FEATURES: List[str] = [
+    "net_node_clustering",
+    "net_global_clustering",
+    "net_avg_abs_corr",
+]
+
+# All network features combined
+NET_FEATURES_FULL: List[str] = NET_FEATURES + CLUSTERING_FEATURES
+
 
 def _fill_net(X: pd.DataFrame) -> pd.DataFrame:
     """
@@ -84,11 +94,17 @@ def _fill_net(X: pd.DataFrame) -> pd.DataFrame:
     information yet).  Using 0 rather than mean imputation avoids introducing
     test-period statistics into training rows.
     """
-    net_cols_present = [c for c in NET_FEATURES if c in X.columns]
+    all_net = NET_FEATURES_FULL
+    net_cols_present = [c for c in all_net if c in X.columns]
     if net_cols_present:
         X = X.copy()
         X[net_cols_present] = X[net_cols_present].fillna(0.0)
     return X
+
+
+def _select_net_features(use_clustering: bool) -> List[str]:
+    """Return the appropriate network feature list."""
+    return NET_FEATURES_FULL if use_clustering else NET_FEATURES
 
 
 # ---------------------------------------------------------------------------
@@ -120,10 +136,13 @@ class NetworkHARRegressor(BaseEstimator, RegressorMixin):
         self,
         lasso_alpha: float = 0.05,
         ridge_alpha: float = 0.0,
+        use_clustering: bool = False,
     ):
         self.lasso_alpha = lasso_alpha
         self.ridge_alpha = ridge_alpha
-        self.features: List[str] = HAR_FEATURES + NET_FEATURES
+        self.use_clustering = use_clustering
+        net_feats = _select_net_features(use_clustering)
+        self.features: List[str] = HAR_FEATURES + net_feats
         self._pipe: Optional[Pipeline] = None
 
     def _make_regressor(self):
@@ -196,10 +215,13 @@ class NetworkVARRegressor(BaseEstimator, RegressorMixin):
         self,
         stage2_alpha: float = 0.1,
         correction_bound: float = 0.5,
+        use_clustering: bool = False,
     ):
         self.stage2_alpha = stage2_alpha
         self.correction_bound = correction_bound
-        self.features: List[str] = HAR_FEATURES + NET_FEATURES
+        self.use_clustering = use_clustering
+        self._net_feats: List[str] = _select_net_features(use_clustering)
+        self.features: List[str] = HAR_FEATURES + self._net_feats
 
         self._stage1: Optional[Pipeline] = None
         self._stage2: Optional[Pipeline] = None
@@ -221,7 +243,7 @@ class NetworkVARRegressor(BaseEstimator, RegressorMixin):
 
     def _fit_stage2(self, X: pd.DataFrame, residuals: pd.Series) -> None:
         """Fit stage-2 Ridge on network features using HAR residuals as target."""
-        X_net = _fill_net(X)[NET_FEATURES]
+        X_net = _fill_net(X)[self._net_feats]
         self._stage2 = Pipeline(
             [
                 ("scaler", StandardScaler()),
@@ -242,7 +264,7 @@ class NetworkVARRegressor(BaseEstimator, RegressorMixin):
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         log_pred1 = self._stage1.predict(X[HAR_FEATURES])
 
-        X_net = _fill_net(X)[NET_FEATURES]
+        X_net = _fill_net(X)[self._net_feats]
         correction = self._stage2.predict(X_net)
         correction = np.clip(correction, -self.correction_bound, self.correction_bound)
 

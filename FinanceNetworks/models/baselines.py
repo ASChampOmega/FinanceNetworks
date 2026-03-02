@@ -170,7 +170,7 @@ class ARIMALogY:
         # Attach business-day frequency so statsmodels does not warn about gaps.
         y_fit = y.asfreq("B").ffill()
 
-        def _try_fit(order, method, maxiter):
+        def _try_fit(order, optimizer, maxiter):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 res = ARIMA(
@@ -178,7 +178,9 @@ class ARIMALogY:
                     order=order,
                     enforce_stationarity=True,
                     enforce_invertibility=True,
-                ).fit(method=method, maxiter=maxiter, disp=False)
+                ).fit(
+                    method_kwargs={"method": optimizer, "maxiter": maxiter, "disp": False},
+                )
             return res
 
         # Try requested order with each optimizer
