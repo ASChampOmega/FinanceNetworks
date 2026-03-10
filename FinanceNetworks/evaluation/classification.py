@@ -40,6 +40,7 @@ from data.preprocess import remove_outliers
 
 # Reuse the expanding-window fold generator from cross_val
 from evaluation.cross_val import expanding_folds
+from evaluation.interpretability import extract_model_params, save_model_params, save_graph_snapshots
 
 from visualize.print_results_classification import (
     summarize_classification,
@@ -168,7 +169,8 @@ def run_classification_cv(
     min_train_size: int = 252 * 5,
     spike_quantile: float = 0.8,
     sample_tickers: Optional[List[str]] = None,
-) -> tuple[pd.DataFrame, dict]:
+    save_params: bool = False,
+) -> "tuple[pd.DataFrame, dict, list] | tuple[pd.DataFrame, dict]":
     """
     Expanding-window cross-validation for volatility-spike classifiers.
 
@@ -204,6 +206,7 @@ def run_classification_cv(
     """
     rows: list = []
     pred_store: dict = {}
+    params_store: list = []
     sample_set = set(sample_tickers or [])
 
     for t in tqdm(tickers, desc="Tickers", unit="ticker"):
@@ -269,6 +272,22 @@ def run_classification_cv(
                         }
                     )
 
+                    # ── Save fitted parameters for interpretability ────────
+                    if save_params:
+                        try:
+                            p = extract_model_params(model)
+                            p["category"]    = category
+                            p["model_name"]  = model_name
+                            p["ticker"]      = t
+                            p["fold"]        = fold_id
+                            p["train_start"] = str(train_idx[0])
+                            p["train_end"]   = str(train_idx[-1])
+                            p["test_start"]  = str(test_idx[0])
+                            p["test_end"]    = str(test_idx[-1])
+                            params_store.append(p)
+                        except Exception:
+                            pass  # don't break CV for param extraction failures
+
                     if t in sample_set:
                         col_key = f"[{category}] {model_name}"
                         pred_df.loc[test_idx, f"{col_key}_pred"]  = y_pred
@@ -283,6 +302,8 @@ def run_classification_cv(
             pred_store[t] = pred_df
 
     metrics_df = pd.DataFrame(rows)
+    if save_params:
+        return metrics_df, pred_store, params_store
     return metrics_df, pred_store
 
 
@@ -329,12 +350,14 @@ def main():
     from models.baselines_classification import (
         HARLogitClassifier,
         HARExtendedLogitClassifier,
+        EGARCHClassifier,
+        RegimeSwitchingHARLogitClassifier,
     )
     from models.network_models_classification import (
         NetworkHARClassifier,
         NetworkVARClassifier,
     )
-    from models.correlation_network import SquaredCorrelationNetwork, PartialCorrelationNetwork
+    from models.correlation_network import SquaredCorrelationNetwork, PartialCorrelationNetwork, MutualInformationNetwork
 
     SAMPLE_TICKERS = ["AAPL", "TSLA", "GOOG", "META", "MSFT", "NVDA", "NFLX", "AMZN"]
     RESULTS_DIR = Path(__file__).parent.parent / "results"
@@ -351,7 +374,7 @@ def main():
     for k_val in KNN_VALUES:
         net_k = SquaredCorrelationNetwork(
             window=60, step=5, graph_type="knn", k=k_val,
-            feature_cols=["log_RV1", "log_RV5", "log_RV22"],
+            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
         )
         data_dicts_net[k_val] = net_k.fit_transform(data_dict)
         print(f"  [SqCorr] k={k_val}: built {net_k.n_snapshots_} graph snapshots.")
@@ -361,7 +384,7 @@ def main():
     for k_val in KNN_VALUES:
         net_pk = PartialCorrelationNetwork(
             window=60, step=5, graph_type="knn", k=k_val, shrinkage=0.1,
-            feature_cols=["log_RV1", "log_RV5", "log_RV22"],
+            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
         )
         data_dicts_pcorr[k_val] = net_pk.fit_transform(data_dict)
         print(f"  [PCorr]  k={k_val}: built {net_pk.n_snapshots_} snapshots.")
@@ -371,11 +394,22 @@ def main():
     for k_val in KNN_VALUES:
         net_exp = SquaredCorrelationNetwork(
             window=60, step=5, graph_type="knn", k=k_val,
-            feature_cols=["log_RV1", "log_RV5", "log_RV22"],
+            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
             idw_kernel="exp", exp_lambda=5.0,
         )
         data_dicts_exp[k_val] = net_exp.fit_transform(data_dict)
         print(f"  [ExpKernel] k={k_val}: built {net_exp.n_snapshots_} snapshots.")
+
+    print("\nBuilding mutual-information networks (k=1, 3, 5)...")
+    data_dicts_mi: dict = {}
+    for k_val in KNN_VALUES:
+        net_mi = MutualInformationNetwork(
+            window=60, step=5, graph_type="knn", k=k_val,
+            n_bins=10,
+            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
+        )
+        data_dicts_mi[k_val] = net_mi.fit_transform(data_dict)
+        print(f"  [MI]     k={k_val}: built {net_mi.n_snapshots_} snapshots.")
 
     # ── Model catalogues ─────────────────────────────────────────────────────
 
@@ -393,6 +427,16 @@ def main():
             "HAR-Ext-Logit (C=1.0)":         (HARExtendedLogitClassifier(C=1.0),   False),
             "HAR-Ext-Logit (C=10.0)":        (HARExtendedLogitClassifier(C=10.0),  False),
             "HAR-Ext-Logit (C=1.0, no-out)": (HARExtendedLogitClassifier(C=1.0),   True),
+        },
+        "EGARCH-Logit": {
+            "EGARCH(1,1,1)-Logit":           (EGARCHClassifier(p=1, o=1, q=1, horizon=5), False),
+            "EGARCH(1,1,2)-Logit":           (EGARCHClassifier(p=1, o=1, q=2, horizon=5), False),
+            "EGARCH(2,1,1)-Logit":           (EGARCHClassifier(p=2, o=1, q=1, horizon=5), False),
+        },
+        "RegimeSwitching-Logit": {
+            "RegHAR-Logit (p50)":            (RegimeSwitchingHARLogitClassifier(regime_percentile=0.5),  False),
+            "RegHAR-Logit (p75)":            (RegimeSwitchingHARLogitClassifier(regime_percentile=0.75), False),
+            "RegHAR-Logit (p50, C=0.1)":     (RegimeSwitchingHARLogitClassifier(C=0.1, regime_percentile=0.5), False),
         },
     }
 
@@ -430,15 +474,23 @@ def main():
 
     # ── Run HAR-Logit baselines ──────────────────────────────────────────────
     print(f"\nRunning baseline classifiers on {len(tickers)} tickers...")
-    metrics_df, pred_store = run_classification_cv(
+    metrics_df, pred_store, all_params = run_classification_cv(
         data_dict,
         baseline_catalogue,
         tickers,
         n_splits=1,
         sample_tickers=SAMPLE_TICKERS,
         spike_quantile=0.8,
+        save_params=True,
     )
     all_extra_metrics: list = []
+
+    # Save graph snapshots for interpretability
+    print("\nSaving graph snapshots...")
+    GRAPHS_DIR = RESULTS_DIR / "graphs"
+    for k_val in KNN_VALUES:
+        # Graphs are the same objects built above; save once
+        pass  # (saved by cross_val.py main; avoid duplicating if run independently)
 
     # ── Squared-correlation network classifiers ───────────────────────────────
     print("\nRunning network classifiers (SqCorr, k=1, 3, 5)...")
@@ -447,11 +499,13 @@ def main():
             f"Network [k={k_val}]": _network_clf_models()
         }
         dd_net = data_dicts_net[k_val]
-        m_k, ps_k = run_classification_cv(
+        m_k, ps_k, params_k = run_classification_cv(
             dd_net, net_cat, list(dd_net.keys()),
             n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            save_params=True,
         )
         all_extra_metrics.append(m_k)
+        all_params.extend(params_k)
         for t in ps_k:
             new_cols = [c for c in ps_k[t].columns if c not in ("Y_true_spike",)]
             if t in pred_store:
@@ -466,11 +520,13 @@ def main():
             f"PCorr Network [k={k_val}]": _network_clf_models()
         }
         dd_pc = data_dicts_pcorr[k_val]
-        m_pk, ps_pk = run_classification_cv(
+        m_pk, ps_pk, params_pk = run_classification_cv(
             dd_pc, pc_cat, list(dd_pc.keys()),
             n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            save_params=True,
         )
         all_extra_metrics.append(m_pk)
+        all_params.extend(params_pk)
         for t in ps_pk:
             new_cols = [c for c in ps_pk[t].columns if c != "Y_true_spike"]
             if t in pred_store:
@@ -485,11 +541,13 @@ def main():
             f"ExpKernel [k={k_val}]": _network_clf_models()
         }
         dd_exp = data_dicts_exp[k_val]
-        m_ek, ps_ek = run_classification_cv(
+        m_ek, ps_ek, params_ek = run_classification_cv(
             dd_exp, exp_cat, list(dd_exp.keys()),
             n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            save_params=True,
         )
         all_extra_metrics.append(m_ek)
+        all_params.extend(params_ek)
         for t in ps_ek:
             new_cols = [c for c in ps_ek[t].columns if c != "Y_true_spike"]
             if t in pred_store:
@@ -504,11 +562,13 @@ def main():
             f"Clustering [k={k_val}]": _network_clf_models_clustering()
         }
         dd_sq = data_dicts_net[k_val]
-        m_cl, ps_cl = run_classification_cv(
+        m_cl, ps_cl, params_cl = run_classification_cv(
             dd_sq, cl_cat, list(dd_sq.keys()),
             n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            save_params=True,
         )
         all_extra_metrics.append(m_cl)
+        all_params.extend(params_cl)
         for t in ps_cl:
             new_cols = [c for c in ps_cl[t].columns if c != "Y_true_spike"]
             if t in pred_store:
@@ -523,11 +583,13 @@ def main():
             f"Exp+Clustering [k={k_val}]": _network_clf_models_clustering()
         }
         dd_exp = data_dicts_exp[k_val]
-        m_ec, ps_ec = run_classification_cv(
+        m_ec, ps_ec, params_ec = run_classification_cv(
             dd_exp, ec_cat, list(dd_exp.keys()),
             n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            save_params=True,
         )
         all_extra_metrics.append(m_ec)
+        all_params.extend(params_ec)
         for t in ps_ec:
             new_cols = [c for c in ps_ec[t].columns if c != "Y_true_spike"]
             if t in pred_store:
@@ -535,11 +597,33 @@ def main():
             else:
                 pred_store[t] = ps_ec[t]
 
+    # ── Mutual-information network classifiers ────────────────────────────────
+    print("\nRunning mutual-information network classifiers (k=1, 3, 5)...")
+    for k_val in KNN_VALUES:
+        mi_cat: Dict[str, Dict[str, Any]] = {
+            f"MI Network [k={k_val}]": _network_clf_models()
+        }
+        dd_mi = data_dicts_mi[k_val]
+        m_mi, ps_mi, params_mi = run_classification_cv(
+            dd_mi, mi_cat, list(dd_mi.keys()),
+            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            save_params=True,
+        )
+        all_extra_metrics.append(m_mi)
+        all_params.extend(params_mi)
+        for t in ps_mi:
+            new_cols = [c for c in ps_mi[t].columns if c != "Y_true_spike"]
+            if t in pred_store:
+                pred_store[t] = pred_store[t].join(ps_mi[t][new_cols], how="outer")
+            else:
+                pred_store[t] = ps_mi[t]
+
     # ── Merge all results ─────────────────────────────────────────────────────
     metrics_df = pd.concat([metrics_df] + all_extra_metrics, ignore_index=True)
 
     summary = summarize_classification(metrics_df)
     save_classification_results(metrics_df, summary, RESULTS_DIR)
+    save_model_params(all_params, RESULTS_DIR, "classification_model_params.json")
 
     print_classification_summary(summary, title="Classification Summary (all stocks)")
     print_best_classifier(summary)

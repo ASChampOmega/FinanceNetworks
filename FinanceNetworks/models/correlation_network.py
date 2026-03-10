@@ -106,6 +106,94 @@ def _squared_corr_distance(arr: np.ndarray) -> np.ndarray:
     return 1.0 - corr ** 2
 
 
+def _mutual_info_distance(arr: np.ndarray, n_bins: int = 10) -> np.ndarray:
+    """
+    d_ij = 1 - NMI(i, j)   where NMI = MI(i,j) / sqrt(H(i) * H(j)).
+
+    Mutual information captures *any* statistical dependency (not just linear),
+    making it complementary to correlation-based distances.  Returns are
+    discretised into *n_bins* equal-frequency (quantile) bins before computing
+    MI so the measure is well-defined for continuous distributions.
+
+    The geometric-mean normalisation clips NMI to [0, 1]:
+        NMI = 0  <=>  X, Y independent
+        NMI = 1  <=>  X, Y are functions of each other (perfect co-dependence)
+    Hence d = 0 (maximally close) when dependence is perfect, and d = 1
+    (maximally far) when the pair is statistically independent.
+
+    Implementation notes
+    --------------------
+    Discretisation uses rank-based equal-frequency binning via double-argsort
+    (no sklearn, no quantile_method warning).  Pairwise joint histograms are
+    computed with a *single* np.bincount call over all n*(n-1)/2 pairs at
+    once by shifting each pair's codes into a non-overlapping integer block.
+    This makes the function fully vectorised with no Python-level pair loop.
+    """
+    n_obs, n_vars = arr.shape
+
+    # --- Rank-based equal-frequency binning (vectorised over all variables) ---
+    # argsort twice gives 0-based dense ranks; map to bins in [0, n_bins-1].
+    # Ties receive distinct consecutive ranks, which is fine for MI.
+    ranks = np.argsort(np.argsort(arr, axis=0), axis=0)          # (n_obs, n_vars)
+    arr_disc = np.clip((ranks * n_bins) // n_obs, 0, n_bins - 1).astype(np.int32)
+
+    # --- Per-variable entropy H(X_i) (vectorised) ---
+    marginal = np.array(
+        [np.bincount(arr_disc[:, v], minlength=n_bins) for v in range(n_vars)],
+        dtype=np.float64,
+    ) / n_obs                                                     # (n_vars, n_bins)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        H = -(marginal * np.where(marginal > 0, np.log(marginal), 0.0)).sum(axis=1)
+
+    # --- Single-bincount vectorised pairwise MI ---
+    # Upper-triangle indices for all pairs
+    ii, jj = np.triu_indices(n_vars, k=1)                        # (n_pairs,) each
+    n_pairs = len(ii)
+    n_bins_sq = n_bins * n_bins
+
+    # Encode each observation's (bin_i, bin_j) as an integer in [0, n_bins²)
+    joint_codes = (arr_disc[:, ii] * n_bins + arr_disc[:, jj]).astype(np.int64)
+    # Shift each pair into its own non-overlapping integer block, then flatten
+    block_offset = np.arange(n_pairs, dtype=np.int64) * n_bins_sq
+    flat_codes = (joint_codes + block_offset).ravel()             # (n_obs * n_pairs,)
+
+    # One bincount for all pairs -> reshape to (n_pairs, n_bins, n_bins)
+    joint_p = (
+        np.bincount(flat_codes, minlength=n_pairs * n_bins_sq)
+        .reshape(n_pairs, n_bins, n_bins)
+        .astype(np.float64)
+        / n_obs
+    )
+
+    # Marginal probabilities from joint distribution
+    p_i = joint_p.sum(axis=2)                                     # (n_pairs, n_bins)
+    p_j = joint_p.sum(axis=1)                                     # (n_pairs, n_bins)
+
+    # Independence baseline p_i ⊗ p_j: (n_pairs, n_bins, n_bins)
+    p_outer = p_i[:, :, np.newaxis] * p_j[:, np.newaxis, :]
+
+    # MI = Σ p_xy * log(p_xy / (p_x * p_y)), skipping zero cells
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_ratio = np.where(
+            (joint_p > 0) & (p_outer > 0),
+            np.log(joint_p) - np.log(p_outer),
+            0.0,
+        )
+    mi_all = (joint_p * log_ratio).sum(axis=(1, 2))              # (n_pairs,)
+
+    # NMI = MI / sqrt(H_i * H_j), clipped to [0, 1]
+    denom = np.sqrt(H[ii] * H[jj])
+    nmi_all = np.clip(
+        np.where(denom > 1e-10, mi_all / denom, 0.0), 0.0, 1.0
+    )
+
+    # Fill symmetric distance matrix
+    dist = np.zeros((n_vars, n_vars))
+    dist[ii, jj] = 1.0 - nmi_all
+    dist[jj, ii] = 1.0 - nmi_all
+    return dist
+
+
 def _partial_corr_distance(arr: np.ndarray, shrinkage: float = 0.1) -> np.ndarray:
     """
     d_ij = 1 - pcorr_ij^2
@@ -722,6 +810,40 @@ class PartialCorrelationNetwork(FinanceNetworkBase):
         dist = _partial_corr_distance(
             returns_window.values.astype(float),
             shrinkage=self.shrinkage,
+        )
+        return pd.DataFrame(dist, index=tickers, columns=tickers)
+
+
+class MutualInformationNetwork(FinanceNetworkBase):
+    """
+    d_ij = 1 - NMI(i, j)   (normalised mutual information distance).
+
+    Unlike correlation-based distances, mutual information is sensitive to
+    *any* statistical dependency -- linear or non-linear -- making it a
+    more agnostic measure of co-movement.  This is particularly useful
+    during tail events where relationships become non-linear.
+
+    Continuous returns are discretised into equal-frequency bins before
+    computing MI.  More bins increase resolution but require a longer window
+    for reliable estimation (rule of thumb: n_obs >= 5 * n_bins^2).
+
+    Parameters
+    ----------
+    n_bins : int
+        Number of quantile bins used to discretise each ticker's return
+        series.  Default: 10.  Increase for longer windows, decrease for
+        short windows or noisy series.
+    """
+
+    def __init__(self, *args, n_bins: int = 10, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.n_bins = n_bins
+
+    def _compute_distance_matrix(self, returns_window: pd.DataFrame) -> pd.DataFrame:
+        tickers = returns_window.columns.tolist()
+        dist = _mutual_info_distance(
+            returns_window.values.astype(float),
+            n_bins=self.n_bins,
         )
         return pd.DataFrame(dist, index=tickers, columns=tickers)
 

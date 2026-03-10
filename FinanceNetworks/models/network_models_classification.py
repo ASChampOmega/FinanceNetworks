@@ -103,11 +103,13 @@ class NetworkHARClassifier(BaseEstimator, ClassifierMixin):
 
     Model
     -----
-    P(spike | log_RV1..log_pos_semi5, net_degree, net_degree_change,
+    P(spike | log_RV1..log_pos_semi5, Returns,
+              net_degree, net_degree_change,
               net_idw_log_RV1..net_idw_log_RV22 [, clustering features])
 
-    A per-fold StandardScaler is embedded in a Pipeline to prevent leakage
-    (same convention as all other models in this project).
+    ``Returns`` supplies the leverage effect: negative return days tend to
+    raise the probability of a future volatility spike disproportionately
+    relative to same-magnitude positive return days.
 
     Parameters
     ----------
@@ -165,7 +167,7 @@ class NetworkVARClassifier(BaseEstimator, ClassifierMixin):
     log-odds space) to the HAR stage-1 output.
 
     Stage 1 — HAR Logistic (own features)
-        Fit logistic regression on HAR_FEATURES.
+        Fit logistic regression on HAR_FEATURES (including Returns).
         Store training log-odds: d1 = decision_function(X_train)
         Store training predicted probability: p1 = sigmoid(d1)
         Compute probability residuals: r = y_train − p1

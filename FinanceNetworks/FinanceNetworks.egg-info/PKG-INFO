@@ -16,6 +16,7 @@ Requires-Dist: scikit-learn
 Requires-Dist: arch
 Requires-Dist: tqdm
 Requires-Dist: statsmodels
+Requires-Dist: networkx
 Dynamic: author
 Dynamic: classifier
 Dynamic: requires-dist

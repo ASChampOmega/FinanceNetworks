@@ -1,13 +1,23 @@
 import copy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Any, Dict
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-from models.baselines import HARLogRegressor, HARExtendedLogRegressor, ARIMALogY, GARCHWeeklyRV
-from models.network_models import NetworkHARRegressor, NetworkVARRegressor
+from models.baselines import (
+    HARLogRegressor, HARExtendedLogRegressor, ARIMALogY, GARCHWeeklyRV,
+    EGARCHWeeklyRV, RegimeSwitchingHARLogRegressor,
+)
+from models.network_models import (
+    NetworkHARRegressor,
+    NetworkVARRegressor,
+    NetworkEGARCHRegressor,
+    NetworkEGARCHXRegressor,
+)
 from data.preprocess import remove_outliers
+from evaluation.interpretability import extract_model_params, save_model_params, save_graph_snapshots
 from visualize.utils import coalesce_categories
 from visualize.print_results import (
     summarize_benchmarks,
@@ -109,7 +119,8 @@ def run_benchmarks_multi_fold(
     test_size: int = 252,
     min_train_size: int = 252 * 5,
     sample_tickers: "list[str] | None" = None,
-) -> "tuple[pd.DataFrame, dict]":
+    save_params: bool = False,
+) -> "tuple[pd.DataFrame, dict, list] | tuple[pd.DataFrame, dict]":
     """
     Run expanding-window cross-validation for a categorised model catalogue.
 
@@ -135,6 +146,7 @@ def run_benchmarks_multi_fold(
     """
     rows: list = []
     pred_store: dict = {}
+    params_store: list = []
     sample_set = set(sample_tickers) if sample_tickers else set()
 
     for t in tqdm(tickers, desc="Tickers", unit="ticker"):
@@ -175,6 +187,22 @@ def run_benchmarks_multi_fold(
                         **m,
                     })
 
+                    # ── Save fitted parameters for interpretability ────────
+                    if save_params:
+                        try:
+                            p = extract_model_params(model)
+                            p["category"]    = category
+                            p["model_name"]  = model_name
+                            p["ticker"]      = t
+                            p["fold"]        = fold_id
+                            p["train_start"] = str(train_idx[0])
+                            p["train_end"]   = str(train_idx[-1])
+                            p["test_start"]  = str(test_idx[0])
+                            p["test_end"]    = str(test_idx[-1])
+                            params_store.append(p)
+                        except Exception:
+                            pass  # don't break CV for param extraction failures
+
                     if t in sample_set:
                         col_key = f"[{category}] {model_name}"
                         pred_df.loc[test_idx, col_key] = y_pred
@@ -183,6 +211,153 @@ def run_benchmarks_multi_fold(
             pred_store[t] = pred_df
 
     metrics_df = pd.DataFrame(rows)
+    if save_params:
+        return metrics_df, pred_store, params_store
+    return metrics_df, pred_store
+
+
+def _run_single_benchmark_task(task: "dict[str, Any]") -> "dict[str, Any]":
+    """Execute one (ticker, fold, model) benchmark task."""
+    feat = task["feat"]
+    train_idx = task["train_idx"]
+    test_idx = task["test_idx"]
+
+    X_train = feat.loc[train_idx]
+    X_test = feat.loc[test_idx]
+
+    model = copy.deepcopy(task["model_template"])
+    X_train_fit = remove_outliers(X_train) if task["do_remove_outliers"] else X_train
+    y_pred = fit_predict_model(model, X_train_fit, X_test)
+    metrics = eval_regression(feat.loc[test_idx, "Y_fwd"].values, y_pred)
+
+    result = {
+        "row": {
+            "Category": task["category"],
+            "Ticker": task["ticker"],
+            "Model": task["model_name"],
+            "Fold": task["fold_id"],
+            **metrics,
+        },
+        "prediction": None,
+        "params": None,
+    }
+
+    if task["store_predictions"]:
+        result["prediction"] = {
+            "ticker": task["ticker"],
+            "col_key": f"[{task['category']}] {task['model_name']}",
+            "test_idx": test_idx,
+            "y_pred": y_pred,
+        }
+
+    if task["save_params"]:
+        try:
+            params = extract_model_params(model)
+            params["category"] = task["category"]
+            params["model_name"] = task["model_name"]
+            params["ticker"] = task["ticker"]
+            params["fold"] = task["fold_id"]
+            params["train_start"] = str(train_idx[0])
+            params["train_end"] = str(train_idx[-1])
+            params["test_start"] = str(test_idx[0])
+            params["test_end"] = str(test_idx[-1])
+            result["params"] = params
+        except Exception:
+            pass
+
+    return result
+
+
+def cross_val_multi(
+    data_dict: "dict[str, pd.DataFrame]",
+    model_catalogue: "Dict[str, Dict[str, Any]]",
+    tickers: "list[str]",
+    n_splits: int = 1,
+    test_size: int = 252,
+    min_train_size: int = 252 * 5,
+    sample_tickers: "list[str] | None" = None,
+    save_params: bool = False,
+    num_threads: int = 4,
+) -> "tuple[pd.DataFrame, dict, list] | tuple[pd.DataFrame, dict]":
+    """
+    Threaded expanding-window cross-validation with dynamic load balancing.
+
+    Work is split at the (ticker, fold, model) level so slow models naturally
+    occupy threads longer while faster tasks continue to drain from the queue.
+    This is more balanced than assigning a fixed subset of models or tickers to
+    each worker up front.
+    """
+    rows: list = []
+    pred_store: dict = {}
+    params_store: list = []
+    sample_set = set(sample_tickers) if sample_tickers else set()
+    tasks: list = []
+
+    for ticker in tickers:
+        if ticker not in data_dict:
+            continue
+
+        feat = data_dict[ticker]
+        if len(feat) < min_train_size + test_size:
+            continue
+
+        if ticker in sample_set:
+            pred_store[ticker] = pd.DataFrame(index=feat.index, data={"Y_true": feat["Y_fwd"]})
+
+        for fold_id, (train_idx, test_idx) in enumerate(
+            expanding_folds(feat.index, n_splits, test_size, min_train_size)
+        ):
+            for category, models in model_catalogue.items():
+                for model_name, model_entry in models.items():
+                    if isinstance(model_entry, tuple):
+                        model_template, do_remove_outliers = model_entry
+                    else:
+                        model_template, do_remove_outliers = model_entry, False
+
+                    tasks.append(
+                        {
+                            "ticker": ticker,
+                            "feat": feat,
+                            "fold_id": fold_id,
+                            "train_idx": train_idx,
+                            "test_idx": test_idx,
+                            "category": category,
+                            "model_name": model_name,
+                            "model_template": model_template,
+                            "do_remove_outliers": do_remove_outliers,
+                            "store_predictions": ticker in sample_set,
+                            "save_params": save_params,
+                        }
+                    )
+
+    if not tasks:
+        metrics_df = pd.DataFrame(rows)
+        if save_params:
+            return metrics_df, pred_store, params_store
+        return metrics_df, pred_store
+
+    max_workers = max(1, int(num_threads))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_run_single_benchmark_task, task) for task in tasks]
+        for future in tqdm(
+            as_completed(futures),
+            total=len(futures),
+            desc="CV tasks",
+            unit="task",
+        ):
+            result = future.result()
+            rows.append(result["row"])
+
+            pred_result = result["prediction"]
+            if pred_result is not None:
+                pred_store[pred_result["ticker"]].loc[pred_result["test_idx"], pred_result["col_key"]] = pred_result["y_pred"]
+
+            if result["params"] is not None:
+                params_store.append(result["params"])
+
+    metrics_df = pd.DataFrame(rows)
+    if save_params:
+        return metrics_df, pred_store, params_store
     return metrics_df, pred_store
 
 
@@ -235,9 +410,9 @@ def main():
     # One SquaredCorrelationNetwork per k value, built ONCE on the full dataset.
     # Each snapshot at date t only uses returns r_{t-window+1}...r_t (past only),
     # so fitting on the full history does NOT introduce look-ahead leakage.
-    print("\nBuilding correlation-network features offline (k=1, 3, 5)...")
-    from models.correlation_network import SquaredCorrelationNetwork, PartialCorrelationNetwork
-    KNN_VALUES = [1, 3, 5]
+    print("\nBuilding correlation-network features offline (k=3)...")
+    from models.correlation_network import SquaredCorrelationNetwork, PartialCorrelationNetwork, MutualInformationNetwork
+    KNN_VALUES = [3]
     nets: dict = {}
     data_dicts_net: dict = {}
     for k_val in KNN_VALUES:
@@ -246,14 +421,20 @@ def main():
             step=5,
             graph_type="knn",
             k=k_val,
-            feature_cols=["log_RV1", "log_RV5", "log_RV22"],
+            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
         )
         data_dicts_net[k_val] = net_k.fit_transform(data_dict)
         nets[k_val] = net_k
         print(f"  [SqCorr] k={k_val}: built {net_k.n_snapshots_} graph snapshots.")
-    net = nets[5]   # reference for degree-dynamics plot
+    net = nets[3]   # reference for degree-dynamics plot
 
-    print("\nBuilding partial-correlation network features offline (k=1, 3, 5)...")
+    # Save graph snapshots for interpretability
+    print("\nSaving graph snapshots...")
+    GRAPHS_DIR = RESULTS_DIR / "graphs"
+    for k_val in KNN_VALUES:
+        save_graph_snapshots(nets[k_val], GRAPHS_DIR, f"sqcorr_k{k_val}")
+
+    print("\nBuilding partial-correlation network features offline (k=3)...")
     nets_pcorr: dict = {}
     data_dicts_pcorr: dict = {}
     for k_val in KNN_VALUES:
@@ -263,14 +444,17 @@ def main():
             graph_type="knn",
             k=k_val,
             shrinkage=0.1,
-            feature_cols=["log_RV1", "log_RV5", "log_RV22"],
+            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
         )
         data_dicts_pcorr[k_val] = net_pk.fit_transform(data_dict)
         nets_pcorr[k_val] = net_pk
         print(f"  [PCorr]  k={k_val}: built {net_pk.n_snapshots_} snapshots.")
 
+    for k_val in KNN_VALUES:
+        save_graph_snapshots(nets_pcorr[k_val], GRAPHS_DIR, f"pcorr_k{k_val}")
+
     # Exp-kernel: same SquaredCorrelationNetwork but with exp(-lambda*d) IDW
-    print("\nBuilding exp-kernel correlation-network features offline (k=1, 3, 5)...")
+    print("\nBuilding exp-kernel correlation-network features offline (k=3)...")
     data_dicts_exp: dict = {}
     for k_val in KNN_VALUES:
         net_exp = SquaredCorrelationNetwork(
@@ -278,12 +462,32 @@ def main():
             step=5,
             graph_type="knn",
             k=k_val,
-            feature_cols=["log_RV1", "log_RV5", "log_RV22"],
+            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
             idw_kernel="exp",
             exp_lambda=5.0,
         )
         data_dicts_exp[k_val] = net_exp.fit_transform(data_dict)
         print(f"  [ExpKernel] k={k_val}: built {net_exp.n_snapshots_} snapshots.")
+
+    # ── Mutual-information network build ─────────────────────────────────────
+    print("\nBuilding mutual-information networks (k=3)...")
+    nets_mi: dict = {}
+    data_dicts_mi: dict = {}
+    for k_val in KNN_VALUES:
+        net_mi = MutualInformationNetwork(
+            window=60,
+            step=5,
+            graph_type="knn",
+            k=k_val,
+            n_bins=10,
+            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
+        )
+        data_dicts_mi[k_val] = net_mi.fit_transform(data_dict)
+        nets_mi[k_val] = net_mi
+        print(f"  [MI]     k={k_val}: built {net_mi.n_snapshots_} snapshots.")
+
+    for k_val in KNN_VALUES:
+        save_graph_snapshots(nets_mi[k_val], GRAPHS_DIR, f"mi_k{k_val}")
 
     # ── Model catalogue (category -> model dict) ─────────────────────────────
     # Each value is {model_display_name: (model_instance, strip_outliers_bool)}.
@@ -322,6 +526,16 @@ def main():
             "GARCH(2,3)":                 (GARCHWeeklyRV(p=2, q=3, horizon=5),              False),
             "GARCH(3,3)":                 (GARCHWeeklyRV(p=3, q=3, horizon=5),              False),
         },
+        "EGARCH": {
+            "EGARCH(1,1,1)": (EGARCHWeeklyRV(p=1, o=1, q=1, horizon=5), False),
+            "EGARCH(1,1,2)": (EGARCHWeeklyRV(p=1, o=1, q=2, horizon=5), False),
+            "EGARCH(2,1,1)": (EGARCHWeeklyRV(p=2, o=1, q=1, horizon=5), False),
+        },
+        "RegimeSwitching": {
+            "RegHAR (p50)": (RegimeSwitchingHARLogRegressor(regime_percentile=0.5), False),
+            "RegHAR (p75)": (RegimeSwitchingHARLogRegressor(regime_percentile=0.75), False),
+            "RegHAR-Lasso (p50)": (RegimeSwitchingHARLogRegressor(lasso_alpha=0.01, regime_percentile=0.5), False),
+        },
     }
 
     def _network_models() -> Dict[str, Any]:
@@ -337,6 +551,18 @@ def main():
                                                                correction_bound=0.5),      False),
             "NetworkVAR (a=0.1, b=1.0)": (NetworkVARRegressor(stage2_alpha=0.1,
                                                                correction_bound=1.0),      False),
+            "NetworkEGARCH (1,1,1)":     (NetworkEGARCHRegressor(p=1, o=1, q=1,
+                                                                   stage2_alpha=0.1,
+                                                                   correction_bound=0.5),   False),
+            "NetworkEGARCHX (1,1,1)":    (NetworkEGARCHXRegressor(p=1, o=1, q=1,
+                                                                    stage2_alpha=0.1,
+                                                                    correction_bound=0.5),  False),
+            "NetworkEGARCH (1,1,2)":     (NetworkEGARCHRegressor(p=1, o=1, q=2,
+                                                                   stage2_alpha=0.1,
+                                                                   correction_bound=0.5),   False),
+            "NetworkEGARCHX (1,1,2)":    (NetworkEGARCHXRegressor(p=1, o=1, q=2,
+                                                                    stage2_alpha=0.1,
+                                                                    correction_bound=0.5),  False),
         }
 
     def _network_models_clustering() -> Dict[str, Any]:
@@ -355,35 +581,54 @@ def main():
             "NetworkVAR+C (a=0.1, b=1.0)": (NetworkVARRegressor(stage2_alpha=0.1,
                                                                   correction_bound=1.0,
                                                                   use_clustering=True), False),
+            "NetworkEGARCH+C (1,1,1)":     (NetworkEGARCHRegressor(p=1, o=1, q=1,
+                                                                     stage2_alpha=0.1,
+                                                                     correction_bound=0.5,
+                                                                     use_clustering=True), False),
+            "NetworkEGARCHX+C (1,1,1)":    (NetworkEGARCHXRegressor(p=1, o=1, q=1,
+                                                                      stage2_alpha=0.1,
+                                                                      correction_bound=0.5,
+                                                                      use_clustering=True), False),
+            "NetworkEGARCH+C (1,1,2)":     (NetworkEGARCHRegressor(p=1, o=1, q=2,
+                                                                     stage2_alpha=0.1,
+                                                                     correction_bound=0.5,
+                                                                     use_clustering=True), False),
+            "NetworkEGARCHX+C (1,1,2)":    (NetworkEGARCHXRegressor(p=1, o=1, q=2,
+                                                                      stage2_alpha=0.1,
+                                                                      correction_bound=0.5,
+                                                                      use_clustering=True), False),
         }
 
     # ── Run baselines ────────────────────────────────────────────────────────
     print(f"\nRunning baseline models on {len(tickers)} tickers...")
-    metrics_df, pred_store = run_benchmarks_multi_fold(
+    metrics_df, pred_store, all_params = cross_val_multi(
         data_dict,
         baseline_catalogue,
         tickers,
         n_splits=1,
         sample_tickers=SAMPLE_TICKERS,
+        save_params=True,
     )
 
     # ── Run squared-correlation network models for each k ────────────────────
     all_net_metrics: list = []
-    print("\nRunning squared-correlation network models (k=1, 3, 5)...")
+    print("\nRunning squared-correlation network models (k=3)...")
     for k_val in KNN_VALUES:
         net_catalogue: Dict[str, Dict[str, Any]] = {
             f"Network [k={k_val}]": _network_models()
         }
         dd_net = data_dicts_net[k_val]
         net_tickers = list(dd_net.keys())
-        metrics_k, pred_store_k = run_benchmarks_multi_fold(
+        metrics_k, pred_store_k, params_k = cross_val_multi(
             dd_net,
             net_catalogue,
             net_tickers,
             n_splits=1,
             sample_tickers=SAMPLE_TICKERS,
+            save_params=True,
         )
         all_net_metrics.append(metrics_k)
+        all_params.extend(params_k)
         for t in pred_store_k:
             new_cols = [c for c in pred_store_k[t].columns if c != "Y_true"]
             if t in pred_store:
@@ -392,21 +637,23 @@ def main():
                 pred_store[t] = pred_store_k[t]
 
     # ── Run partial-correlation network models for each k ─────────────────────
-    print("\nRunning partial-correlation network models (k=1, 3, 5)...")
+    print("\nRunning partial-correlation network models (k=3)...")
     for k_val in KNN_VALUES:
         pcorr_catalogue: Dict[str, Dict[str, Any]] = {
             f"PCorr Network [k={k_val}]": _network_models()
         }
         dd_pc = data_dicts_pcorr[k_val]
         pc_tickers = list(dd_pc.keys())
-        metrics_pk, pred_store_pk = run_benchmarks_multi_fold(
+        metrics_pk, pred_store_pk, params_pk = cross_val_multi(
             dd_pc,
             pcorr_catalogue,
             pc_tickers,
             n_splits=1,
             sample_tickers=SAMPLE_TICKERS,
+            save_params=True,
         )
         all_net_metrics.append(metrics_pk)
+        all_params.extend(params_pk)
         for t in pred_store_pk:
             new_cols = [c for c in pred_store_pk[t].columns if c != "Y_true"]
             if t in pred_store:
@@ -415,21 +662,23 @@ def main():
                 pred_store[t] = pred_store_pk[t]
 
     # ── Run exp-kernel SqCorr network models for each k ──────────────────────
-    print("\nRunning exp-kernel network models (k=1, 3, 5)...")
+    print("\nRunning exp-kernel network models (k=3)...")
     for k_val in KNN_VALUES:
         exp_catalogue: Dict[str, Dict[str, Any]] = {
             f"ExpKernel [k={k_val}]": _network_models()
         }
         dd_exp = data_dicts_exp[k_val]
         exp_tickers = list(dd_exp.keys())
-        metrics_ek, pred_store_ek = run_benchmarks_multi_fold(
+        metrics_ek, pred_store_ek, params_ek = cross_val_multi(
             dd_exp,
             exp_catalogue,
             exp_tickers,
             n_splits=1,
             sample_tickers=SAMPLE_TICKERS,
+            save_params=True,
         )
         all_net_metrics.append(metrics_ek)
+        all_params.extend(params_ek)
         for t in pred_store_ek:
             new_cols = [c for c in pred_store_ek[t].columns if c != "Y_true"]
             if t in pred_store:
@@ -438,21 +687,23 @@ def main():
                 pred_store[t] = pred_store_ek[t]
 
     # ── Run clustering-feature network models (standard inv-IDW) ─────────────
-    print("\nRunning clustering-feature network models (k=1, 3, 5)...")
+    print("\nRunning clustering-feature network models (k=3)...")
     for k_val in KNN_VALUES:
         clust_catalogue: Dict[str, Dict[str, Any]] = {
             f"Clustering [k={k_val}]": _network_models_clustering()
         }
         dd_sq = data_dicts_net[k_val]
         sq_tickers = list(dd_sq.keys())
-        metrics_cl, pred_store_cl = run_benchmarks_multi_fold(
+        metrics_cl, pred_store_cl, params_cl = cross_val_multi(
             dd_sq,
             clust_catalogue,
             sq_tickers,
             n_splits=1,
             sample_tickers=SAMPLE_TICKERS,
+            save_params=True,
         )
         all_net_metrics.append(metrics_cl)
+        all_params.extend(params_cl)
         for t in pred_store_cl:
             new_cols = [c for c in pred_store_cl[t].columns if c != "Y_true"]
             if t in pred_store:
@@ -460,22 +711,49 @@ def main():
             else:
                 pred_store[t] = pred_store_cl[t]
 
+    # ── Run mutual-information network models ────────────────────────────────
+    print("\nRunning mutual-information network models (k=3)...")
+    for k_val in KNN_VALUES:
+        mi_catalogue: Dict[str, Dict[str, Any]] = {
+            f"MI Network [k={k_val}]": _network_models()
+        }
+        dd_mi = data_dicts_mi[k_val]
+        mi_tickers = list(dd_mi.keys())
+        metrics_mi, pred_store_mi, params_mi = cross_val_multi(
+            dd_mi,
+            mi_catalogue,
+            mi_tickers,
+            n_splits=1,
+            sample_tickers=SAMPLE_TICKERS,
+            save_params=True,
+        )
+        all_net_metrics.append(metrics_mi)
+        all_params.extend(params_mi)
+        for t in pred_store_mi:
+            new_cols = [c for c in pred_store_mi[t].columns if c != "Y_true"]
+            if t in pred_store:
+                pred_store[t] = pred_store[t].join(pred_store_mi[t][new_cols], how="outer")
+            else:
+                pred_store[t] = pred_store_mi[t]
+
     # ── Run exp-kernel + clustering-feature network models ───────────────────
-    print("\nRunning exp-kernel + clustering-feature network models (k=1, 3, 5)...")
+    print("\nRunning exp-kernel + clustering-feature network models (k=3)...")
     for k_val in KNN_VALUES:
         expc_catalogue: Dict[str, Dict[str, Any]] = {
             f"Exp+Clustering [k={k_val}]": _network_models_clustering()
         }
         dd_exp = data_dicts_exp[k_val]
         expc_tickers = list(dd_exp.keys())
-        metrics_ec, pred_store_ec = run_benchmarks_multi_fold(
+        metrics_ec, pred_store_ec, params_ec = cross_val_multi(
             dd_exp,
             expc_catalogue,
             expc_tickers,
             n_splits=1,
             sample_tickers=SAMPLE_TICKERS,
+            save_params=True,
         )
         all_net_metrics.append(metrics_ec)
+        all_params.extend(params_ec)
         for t in pred_store_ec:
             new_cols = [c for c in pred_store_ec[t].columns if c != "Y_true"]
             if t in pred_store:
@@ -487,6 +765,7 @@ def main():
 
     # Save the full (un-coalesced) results for later analysis
     save_results(metrics_df, summarize_benchmarks(metrics_df), RESULTS_DIR)
+    save_model_params(all_params, RESULTS_DIR, "regression_model_params.json")
 
     # Coalesce k-variants into super-categories for printing/plotting
     metrics_coalesced = coalesce_categories(metrics_df)
@@ -499,18 +778,18 @@ def main():
     print_per_ticker_tables(metrics_coalesced, SAMPLE_TICKERS)
 
     # ── Plots ─────────────────────────────────────────────────────────────────
-    plot_network_degrees(
-        net,
-        sample_tickers=SAMPLE_TICKERS,
-        save_path=str(RESULTS_DIR / "network_degrees.png"),
-    )
-    plot_summary_metrics(summary, save_path=str(RESULTS_DIR / "summary_metrics.png"))
-    plot_ticker_predictions(
-        pred_store,
-        metrics_coalesced,
-        SAMPLE_TICKERS,
-        save_dir=str(RESULTS_DIR),
-    )
+    # plot_network_degrees(
+    #     net,
+    #     sample_tickers=SAMPLE_TICKERS,
+    #     save_path=str(RESULTS_DIR / "network_degrees.png"),
+    # )
+    # plot_summary_metrics(summary, save_path=str(RESULTS_DIR / "summary_metrics.png"))
+    # plot_ticker_predictions(
+    #     pred_store,
+    #     metrics_coalesced,
+    #     SAMPLE_TICKERS,
+    #     save_dir=str(RESULTS_DIR),
+    # )
 
 
 def sanity_main():
@@ -538,7 +817,7 @@ def sanity_main():
     print(f"\nBuilding SquaredCorrelationNetwork (k={K_VAL}, inv-kernel)...")
     net_sq = SquaredCorrelationNetwork(
         window=60, step=5, graph_type="knn", k=K_VAL,
-        feature_cols=["log_RV1", "log_RV5", "log_RV22"],
+        feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
     )
     dd_sq = net_sq.fit_transform(data_dict)
     print(f"  {net_sq.n_snapshots_} snapshots.")
@@ -546,7 +825,7 @@ def sanity_main():
     print(f"\nBuilding PartialCorrelationNetwork (k={K_VAL})...")
     net_pc = PartialCorrelationNetwork(
         window=60, step=5, graph_type="knn", k=K_VAL, shrinkage=0.1,
-        feature_cols=["log_RV1", "log_RV5", "log_RV22"],
+        feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
     )
     dd_pc = net_pc.fit_transform(data_dict)
     print(f"  {net_pc.n_snapshots_} snapshots.")
@@ -554,7 +833,7 @@ def sanity_main():
     print(f"\nBuilding SquaredCorrelationNetwork (k={K_VAL}, exp-kernel)...")
     net_exp = SquaredCorrelationNetwork(
         window=60, step=5, graph_type="knn", k=K_VAL,
-        feature_cols=["log_RV1", "log_RV5", "log_RV22"],
+        feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
         idw_kernel="exp", exp_lambda=5.0,
     )
     dd_exp = net_exp.fit_transform(data_dict)
@@ -568,7 +847,7 @@ def sanity_main():
     }
 
     print(f"\nRunning baseline catalogue ({len(tickers)} tickers)...")
-    metrics_df, pred_store = run_benchmarks_multi_fold(
+    metrics_df, pred_store = cross_val_multi(
         data_dict, catalogue, tickers,
         n_splits=1, sample_tickers=SAMPLE,
     )
@@ -580,10 +859,11 @@ def sanity_main():
     net_cat: Dict[str, Dict[str, Any]] = {
         f"Network [k={K_VAL}]": {
             "NetHAR (Lasso a=0.05)": (NetworkHARRegressor(lasso_alpha=0.05), False),
+            "NetworkEGARCH (1,1,1)": (NetworkEGARCHRegressor(p=1, o=1, q=1), False),
         }
     }
     print(f"\nRunning Network [k={K_VAL}] (squared-corr, inv)...")
-    m_sq, ps_sq = run_benchmarks_multi_fold(
+    m_sq, ps_sq = cross_val_multi(
         dd_sq, net_cat, list(dd_sq.keys()),
         n_splits=1, sample_tickers=SAMPLE,
     )
@@ -593,10 +873,11 @@ def sanity_main():
     pc_cat: Dict[str, Dict[str, Any]] = {
         f"PCorr Network [k={K_VAL}]": {
             "NetHAR (Lasso a=0.05)": (NetworkHARRegressor(lasso_alpha=0.05), False),
+            "NetworkEGARCH (1,1,1)": (NetworkEGARCHRegressor(p=1, o=1, q=1), False),
         }
     }
     print(f"\nRunning PCorr Network [k={K_VAL}]...")
-    m_pc, ps_pc = run_benchmarks_multi_fold(
+    m_pc, ps_pc = cross_val_multi(
         dd_pc, pc_cat, list(dd_pc.keys()),
         n_splits=1, sample_tickers=SAMPLE,
     )
@@ -606,10 +887,11 @@ def sanity_main():
     ek_cat: Dict[str, Dict[str, Any]] = {
         f"ExpKernel [k={K_VAL}]": {
             "NetHAR (Lasso a=0.05)": (NetworkHARRegressor(lasso_alpha=0.05), False),
+            "NetworkEGARCH (1,1,1)": (NetworkEGARCHRegressor(p=1, o=1, q=1), False),
         }
     }
     print(f"\nRunning ExpKernel [k={K_VAL}]...")
-    m_ek, ps_ek = run_benchmarks_multi_fold(
+    m_ek, ps_ek = cross_val_multi(
         dd_exp, ek_cat, list(dd_exp.keys()),
         n_splits=1, sample_tickers=SAMPLE,
     )
@@ -619,10 +901,11 @@ def sanity_main():
     cl_cat: Dict[str, Dict[str, Any]] = {
         f"Clustering [k={K_VAL}]": {
             "NetHAR+C (Lasso a=0.05)": (NetworkHARRegressor(lasso_alpha=0.05, use_clustering=True), False),
+            "NetworkEGARCH+C (1,1,1)": (NetworkEGARCHRegressor(p=1, o=1, q=1, use_clustering=True), False),
         }
     }
     print(f"\nRunning Clustering [k={K_VAL}]...")
-    m_cl, ps_cl = run_benchmarks_multi_fold(
+    m_cl, ps_cl = cross_val_multi(
         dd_sq, cl_cat, list(dd_sq.keys()),
         n_splits=1, sample_tickers=SAMPLE,
     )
@@ -632,10 +915,11 @@ def sanity_main():
     ec_cat: Dict[str, Dict[str, Any]] = {
         f"Exp+Clustering [k={K_VAL}]": {
             "NetHAR+C (Lasso a=0.05)": (NetworkHARRegressor(lasso_alpha=0.05, use_clustering=True), False),
+            "NetworkEGARCH+C (1,1,1)": (NetworkEGARCHRegressor(p=1, o=1, q=1, use_clustering=True), False),
         }
     }
     print(f"\nRunning Exp+Clustering [k={K_VAL}]...")
-    m_ec, ps_ec = run_benchmarks_multi_fold(
+    m_ec, ps_ec = cross_val_multi(
         dd_exp, ec_cat, list(dd_exp.keys()),
         n_splits=1, sample_tickers=SAMPLE,
     )

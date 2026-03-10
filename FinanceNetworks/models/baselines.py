@@ -325,3 +325,254 @@ class GARCHWeeklyRV:
             sigma2_hist.append(sigma2_1)
 
         return preds
+
+
+# ---------------------------------------------------------------------------
+# EGARCH weekly RV forecast
+# ---------------------------------------------------------------------------
+
+class EGARCHWeeklyRV(BaseEstimator, RegressorMixin):
+    """
+    Faster EGARCH weekly-RV forecaster.
+
+    Key design choice
+    -----------------
+     We fit EGARCH once on the training slice, then freeze the parameters and
+     forecast the entire test block in one call by concatenating training and
+     observed test returns.  This preserves the intended rolling-origin setup
+     while avoiding an expensive model rebuild for every test row.
+
+    Notes
+    -----
+    - Assumes X["Returns"] at row t is known at forecast origin t, and the target
+      is future volatility from t+1 onward.
+    """
+
+    def __init__(
+        self,
+        p: int = 1,
+        o: int = 1,
+        q: int = 1,
+        dist: str = "normal",
+        mean: str = "zero",
+        scale: float = 1.0,
+        horizon: int = 5,
+        n_simulations: int = 500,
+    ):
+        self.p = p
+        self.o = o
+        self.q = q
+        self.dist = dist
+        self.mean = mean
+        self.scale = scale
+        self.horizon = horizon
+        self.n_simulations = n_simulations
+        self.res_ = None
+        self.features = ["log_RV1", "log_RV5", "log_RV22", "Returns"]
+        self._train_returns = None
+        self._params = None
+        self._arch_model_kwargs = {
+            "mean": self.mean,
+            "vol": "EGARCH",
+            "p": self.p,
+            "o": self.o,
+            "q": self.q,
+            "dist": self.dist,
+        }
+
+    def _make_model(self, series):
+        try:
+            from arch import arch_model
+        except ImportError as e:
+            raise ImportError(
+                "arch package not available. Install via: pip install arch"
+            ) from e
+
+        return arch_model(series, **self._arch_model_kwargs)
+
+    def _prepare_training_returns(self, X: pd.DataFrame) -> np.ndarray:
+        if "Returns" not in X.columns:
+            raise ValueError("X must contain a 'Returns' column.")
+
+        r = pd.to_numeric(X["Returns"], errors="coerce").dropna()
+        if len(r) < max(50, self.horizon + 10):
+            raise ValueError(
+                f"Not enough non-missing training returns for EGARCH: {len(r)} rows."
+            )
+
+        return r.astype(float).values * self.scale
+
+    def _prepare_predict_returns(self, X: pd.DataFrame) -> np.ndarray:
+        if "Returns" not in X.columns:
+            raise ValueError("X must contain a 'Returns' column.")
+
+        r_test = pd.to_numeric(X["Returns"], errors="coerce")
+        if r_test.isna().any():
+            bad = int(r_test.isna().sum())
+            raise ValueError(
+                f"X['Returns'] contains {bad} missing/non-numeric values. "
+                "Please clean them before calling predict()."
+            )
+
+        return r_test.astype(float).values * self.scale
+
+    def _fit_egarch(self, X: pd.DataFrame):
+        x = self._prepare_training_returns(X)
+        am = self._make_model(x)
+        self.res_ = am.fit(disp="off")
+        self._train_returns = x.copy()
+        self._params = self.res_.params.copy()
+        return self
+
+    def _align_forecast_matrix(self, var_matrix: np.ndarray, n_rows: int) -> np.ndarray:
+        if var_matrix.shape[0] == n_rows + 1:
+            return var_matrix[1:]
+        if var_matrix.shape[0] > n_rows:
+            return var_matrix[-n_rows:]
+        if var_matrix.shape[0] != n_rows:
+            raise RuntimeError(
+                f"Unexpected EGARCH forecast shape {var_matrix.shape}; expected {n_rows} rows."
+            )
+        return var_matrix
+
+    def _forecast_in_sample(self) -> np.ndarray:
+        if self.res_ is None:
+            raise RuntimeError("Call fit() before requesting EGARCH forecasts.")
+
+        fcst = self.res_.forecast(
+            horizon=self.horizon,
+            method="simulation",
+            simulations=self.n_simulations,
+            start=0,
+            reindex=False,
+        )
+        var_matrix = np.asarray(fcst.variance.values, dtype=float)
+        return var_matrix.sum(axis=1) / (self.scale ** 2)
+
+    def _forecast_out_of_sample(self, X: pd.DataFrame) -> np.ndarray:
+        if self.res_ is None or self._train_returns is None or self._params is None:
+            raise RuntimeError("Call fit() before predict().")
+
+        r_test = self._prepare_predict_returns(X)
+        n_train = len(self._train_returns)
+        n_pred = len(r_test)
+        all_returns = np.concatenate([self._train_returns, r_test])
+
+        fixed = self._make_model(all_returns).fix(self._params)
+        fcst = fixed.forecast(
+            horizon=self.horizon,
+            method="simulation",
+            simulations=self.n_simulations,
+            start=n_train - 1,
+            reindex=False,
+        )
+
+        var_matrix = np.asarray(fcst.variance.values, dtype=float)
+        var_matrix = self._align_forecast_matrix(var_matrix, n_pred)
+        return var_matrix.sum(axis=1) / (self.scale ** 2)
+
+    def fit(self, X: pd.DataFrame, y: pd.Series = None):
+        return self._fit_egarch(X)
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return self._forecast_out_of_sample(X)
+
+
+# ---------------------------------------------------------------------------
+# Regime-Switching HAR (threshold-based, 2 regimes)
+# ---------------------------------------------------------------------------
+
+class RegimeSwitchingHARLogRegressor(BaseEstimator, RegressorMixin):
+    """
+    Two-regime threshold HAR model in log space.
+
+    Regime identification
+    ---------------------
+    Regimes are defined by the *regime_col* feature (default: log_RV22)
+    relative to a threshold computed as the *regime_percentile* quantile of
+    that column in the *training* fold:
+        Regime 0 (low vol) : regime_col <= threshold
+        Regime 1 (high vol): regime_col >  threshold
+
+    Motivation: volatility dynamics differ markedly across calm and turbulent
+    markets.  Fitting separate HAR equations per regime allows distinct
+    persistence parameters, capturing:
+      - Stronger mean-reversion in low-volatility regimes.
+      - Slower decay and fatter coefficients in crisis regimes.
+
+    A separate StandardScaler is embedded inside each regime's Pipeline so
+    that training statistics are estimated only on the regime-specific subset
+    of the training fold -- no look-ahead leakage.
+
+    Parameters
+    ----------
+    ridge_alpha      : L2 penalty (forwarded to each regime's regressor).
+    lasso_alpha      : L1 penalty (forwarded; lasso takes priority over ridge).
+    regime_col       : Column used to define the regime indicator.
+    regime_percentile: Training quantile used as the regime threshold.
+                       0.5  -> median split.  Increase to make high-vol
+                       regime rarer (e.g. 0.75 for top quartile).
+    min_regime_obs   : Minimum number of observations a regime must have in
+                       training before falling back to a pooled model.
+    """
+
+    def __init__(
+        self,
+        ridge_alpha: float = 0.0,
+        lasso_alpha: float = 0.0,
+        regime_col: str = "log_RV22",
+        regime_percentile: float = 0.5,
+        min_regime_obs: int = 30,
+    ):
+        self.ridge_alpha = ridge_alpha
+        self.lasso_alpha = lasso_alpha
+        self.regime_col = regime_col
+        self.regime_percentile = regime_percentile
+        self.min_regime_obs = min_regime_obs
+        self.features = ["log_RV1", "log_RV5", "log_RV22"]
+        self.threshold_: float = 0.0
+        self.models_: dict = {}
+        self.fallback_model_: Optional[Pipeline] = None
+
+    def _make_pipeline(self) -> Pipeline:
+        base = _build_regressor(self.ridge_alpha, self.lasso_alpha)
+        return Pipeline([("scaler", StandardScaler()), ("reg", base)])
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "RegimeSwitchingHARLogRegressor":
+        self.threshold_ = float(np.nanquantile(X[self.regime_col], self.regime_percentile))
+
+        # Fit a pooled fallback model on all training data
+        self.fallback_model_ = self._make_pipeline()
+        self.fallback_model_.fit(X[self.features], y)
+
+        # Fit per-regime models if each regime has enough observations
+        for regime in (0, 1):
+            mask = (
+                X[self.regime_col] <= self.threshold_
+                if regime == 0
+                else X[self.regime_col] > self.threshold_
+            )
+            X_r, y_r = X.loc[mask, self.features], y.loc[mask]
+            if len(X_r) >= self.min_regime_obs:
+                m = self._make_pipeline()
+                m.fit(X_r, y_r)
+                self.models_[regime] = m
+
+        return self
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        preds = np.empty(len(X))
+
+        for regime in (0, 1):
+            mask = (
+                (X[self.regime_col] <= self.threshold_)
+                if regime == 0
+                else (X[self.regime_col] > self.threshold_)
+            )
+            if not mask.any():
+                continue
+            model = self.models_.get(regime, self.fallback_model_)
+            log_yhat = model.predict(X.loc[mask, self.features])
+            preds[np.where(mask)[0]] = np.exp(log_yhat)
+
+        return preds

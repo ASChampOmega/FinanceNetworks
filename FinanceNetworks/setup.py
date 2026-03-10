@@ -16,6 +16,7 @@ setup(
         'arch',
         'tqdm',
         'statsmodels',
+        'networkx',
     ],
     classifiers=[
         'Programming Language :: Python :: 3',

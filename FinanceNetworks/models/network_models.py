@@ -15,6 +15,16 @@ NetworkHARRegressor
     plus network structural features (degree, neighbourhood turnover, IDW RVs).
     Straightforward baseline for network-augmented prediction.
 
+NetworkEGARCHRegressor
+    Two-stage stacked EGARCH model.  Stage 1 produces an efficient EGARCH
+    weekly-RV forecast; Stage 2 learns a bounded residual correction from
+    network features only.
+
+NetworkEGARCHXRegressor
+    EGARCHX-style extension of NetworkEGARCHRegressor.  Uses the same EGARCH
+    base forecast but exposes own-stock HAR features together with the network
+    features in the correction stage.
+
 NetworkVARRegressor
     Two-stage "network error correction" model:
       Stage 1 -- Standard HAR-Extended OLS fit in log space (own features only).
@@ -37,6 +47,7 @@ Network features expected (produced by FinanceNetworkBase.transform())
     net_idw_log_RV1       IDW mean of neighbours' log_RV1
     net_idw_log_RV5       IDW mean of neighbours' log_RV5
     net_idw_log_RV22      IDW mean of neighbours' log_RV22
+    net_idw_Returns       IDW mean of neighbours' signed returns
 
 Missing net_* values (rows before the first graph snapshot) are imputed
 with 0.0 --- a sensible prior when no graph information is available.
@@ -53,6 +64,8 @@ from sklearn.linear_model import Lasso, LinearRegression, Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from models.baselines import EGARCHWeeklyRV
+
 
 # ---------------------------------------------------------------------------
 # Shared feature lists
@@ -65,6 +78,8 @@ HAR_FEATURES: List[str] = [
     "log_RV22",
     "log_neg_semi5",
     "log_pos_semi5",
+    "Returns",          # signed return: captures leverage effect (negative
+                        # shocks drive more future volatility than positive ones)
 ]
 
 NET_FEATURES: List[str] = [
@@ -73,6 +88,9 @@ NET_FEATURES: List[str] = [
     "net_idw_log_RV1",
     "net_idw_log_RV5",
     "net_idw_log_RV22",
+    "net_idw_Returns",  # IDW mean of neighbours' signed returns: cross-sectional
+                        # leverage signal -- negative neighbour returns predict
+                        # higher own future volatility via contagion
 ]
 
 # Extended network features (clustering + market-wide connectivity)
@@ -105,6 +123,11 @@ def _fill_net(X: pd.DataFrame) -> pd.DataFrame:
 def _select_net_features(use_clustering: bool) -> List[str]:
     """Return the appropriate network feature list."""
     return NET_FEATURES_FULL if use_clustering else NET_FEATURES
+
+
+def _dedupe_preserve_order(columns: List[str]) -> List[str]:
+    """Remove duplicate column names while preserving their first appearance."""
+    return list(dict.fromkeys(columns))
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +207,7 @@ class NetworkVARRegressor(BaseEstimator, RegressorMixin):
     Stage 1 -- Own dynamics
         Fit a HAR-Extended OLS regression in log space using only own lags:
             log_Ŷ_1 = f(log_RV1, log_RV5, log_RV10, log_RV22,
-                         log_neg_semi5, log_pos_semi5)
+                         log_neg_semi5, log_pos_semi5, Returns)
         Compute training residuals: e_t = log_Y_t - log_Ŷ_1,t
 
     Stage 2 -- Network error correction
@@ -269,3 +292,118 @@ class NetworkVARRegressor(BaseEstimator, RegressorMixin):
         correction = np.clip(correction, -self.correction_bound, self.correction_bound)
 
         return np.exp(log_pred1 + correction)
+
+
+# ---------------------------------------------------------------------------
+# Stacked NetworkEGARCH models
+# ---------------------------------------------------------------------------
+
+class _BaseNetworkEGARCHRegressor(EGARCHWeeklyRV):
+    """Shared two-stage EGARCH base + exogenous residual-correction model."""
+
+    def __init__(
+        self,
+        p: int = 1,
+        o: int = 1,
+        q: int = 1,
+        dist: str = "normal",
+        mean: str = "zero",
+        scale: float = 1.0,
+        horizon: int = 5,
+        n_simulations: int = 500,
+        stage2_alpha: float = 0.1,
+        correction_bound: float = 0.5,
+        use_clustering: bool = False,
+    ):
+        super().__init__(
+            p=p,
+            o=o,
+            q=q,
+            dist=dist,
+            mean=mean,
+            scale=scale,
+            horizon=horizon,
+            n_simulations=n_simulations,
+        )
+        self.stage2_alpha = stage2_alpha
+        self.correction_bound = correction_bound
+        self.use_clustering = use_clustering
+        self._net_feats: List[str] = _select_net_features(use_clustering)
+        self.features = _dedupe_preserve_order(["Returns"] + self._stage2_feature_names())
+        self._stage2: Optional[Pipeline] = None
+
+    def _stage2_feature_names(self) -> List[str]:
+        raise NotImplementedError
+
+    def _make_stage2_regressor(self):
+        if self.stage2_alpha > 0:
+            return Ridge(alpha=self.stage2_alpha)
+        return LinearRegression()
+
+    def _build_stage2_matrix(self, X: pd.DataFrame, log_base: np.ndarray) -> pd.DataFrame:
+        X_stage = _fill_net(X)
+        extra_cols = self._stage2_feature_names()
+        if extra_cols:
+            stage_df = X_stage[extra_cols].copy()
+        else:
+            stage_df = pd.DataFrame(index=X.index)
+        stage_df.insert(0, "log_egarch_base", np.asarray(log_base, dtype=float))
+        return stage_df
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "_BaseNetworkEGARCHRegressor":
+        super().fit(X, y)
+
+        base_train = self._forecast_in_sample()
+        log_base_train = np.log(np.clip(base_train, 1e-12, None))
+        residuals = y.values - log_base_train
+
+        self._stage2 = Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                ("reg", self._make_stage2_regressor()),
+            ]
+        )
+        self._stage2.fit(self._build_stage2_matrix(X, log_base_train), residuals)
+        return self
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        if self._stage2 is None:
+            raise RuntimeError("Call fit() before predict().")
+
+        base_test = self._forecast_out_of_sample(X)
+        log_base_test = np.log(np.clip(base_test, 1e-12, None))
+        correction = self._stage2.predict(self._build_stage2_matrix(X, log_base_test))
+        correction = np.clip(correction, -self.correction_bound, self.correction_bound)
+        return np.exp(log_base_test + correction)
+
+
+class NetworkEGARCHRegressor(_BaseNetworkEGARCHRegressor):
+    """
+    Efficient network-augmented EGARCH forecaster.
+
+    Stage 1
+        Fit EGARCH once on the training returns and produce the usual weekly
+        RV forecasts for both train and test windows.
+
+    Stage 2
+        Learn a bounded log-space correction using only network features plus
+        the base EGARCH forecast.  This keeps the expensive volatility fitting
+        unchanged while allowing the correlation-network state to shift the
+        final prediction.
+    """
+
+    def _stage2_feature_names(self) -> List[str]:
+        return self._net_feats
+
+
+class NetworkEGARCHXRegressor(_BaseNetworkEGARCHRegressor):
+    """
+    EGARCHX-style stacked forecaster using own HAR and network exogenous terms.
+
+    This is an efficient approximation to a full joint EGARCHX estimation:
+    the EGARCH dynamics are fit once in stage 1, and a second-stage linear
+    correction uses the base EGARCH forecast together with exogenous features.
+    """
+
+    def _stage2_feature_names(self) -> List[str]:
+        return _dedupe_preserve_order(HAR_FEATURES + self._net_feats)
