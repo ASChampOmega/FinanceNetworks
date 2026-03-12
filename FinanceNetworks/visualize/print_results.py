@@ -220,3 +220,6 @@ def load_and_print_results(
             summary,
             save_path=str(results_dir / "summary_metrics.png"),
         )
+
+if __name__ == "__main__":
+    load_and_print_results()

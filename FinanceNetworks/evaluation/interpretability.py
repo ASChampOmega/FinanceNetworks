@@ -6,7 +6,7 @@ and network graph snapshots for post-hoc interpretability analysis.
 
 Two main capabilities:
 1. **Model parameter extraction** -- given a fitted model instance (any of the
-   HAR / ARIMA / GARCH / EGARCH / Regime-Switching / Network variants, for
+   HAR / ARIMA / GARCH / Regime-Switching / Network variants, for
    both regression and classification), produce a JSON-serializable dictionary
    of all learned parameters (coefficients, intercepts, scaler statistics,
    regime thresholds, ARIMA/GARCH params, etc.).
@@ -137,7 +137,7 @@ def extract_model_params(model: Any) -> Dict[str, Any]:
     For ARIMA:
       - "arima_order", "arima_params" (dict of param name -> value)
 
-    For GARCH / EGARCH:
+    For GARCH:
       - "garch_params" (omega, alpha[], beta[], etc.)
 
     For Regime-Switching models:
@@ -193,36 +193,6 @@ def extract_model_params(model: Any) -> Dict[str, Any]:
             if hasattr(model.res_, "loglikelihood"):
                 info["loglikelihood"] = float(model.res_.loglikelihood)
 
-    # ── EGARCH (regression) ────────────────────────────────────────────
-    elif class_name == "EGARCHWeeklyRV":
-        info["p"] = model.p
-        info["o"] = model.o
-        info["q"] = model.q
-        info["horizon"] = model.horizon
-        info["scale"] = model.scale
-        if hasattr(model, "res_") and model.res_ is not None:
-            info["egarch_params"] = {
-                str(k): float(v) for k, v in model.res_.params.items()
-            }
-            if hasattr(model.res_, "aic"):
-                info["aic"] = float(model.res_.aic)
-            if hasattr(model.res_, "bic"):
-                info["bic"] = float(model.res_.bic)
-
-    # ── EGARCH (classification) ────────────────────────────────────────
-    elif class_name == "EGARCHClassifier":
-        info["p"] = model.p
-        info["o"] = model.o
-        info["q"] = model.q
-        info["horizon"] = model.horizon
-        info["scale"] = model.scale
-        if hasattr(model, "_egarch_res") and model._egarch_res is not None:
-            info["egarch_params"] = {
-                str(k): float(v) for k, v in model._egarch_res.params.items()
-            }
-        if hasattr(model, "logit_") and model.logit_ is not None:
-            info["logit_calibration"] = _extract_pipeline_params(model.logit_)
-
     # ── Regime-Switching HAR (regression) ──────────────────────────────
     elif class_name == "RegimeSwitchingHARLogRegressor":
         info["regime_col"] = model.regime_col
@@ -262,27 +232,6 @@ def extract_model_params(model: Any) -> Dict[str, Any]:
         info["correction_bound"] = model.correction_bound
         if hasattr(model, "_stage1") and model._stage1 is not None:
             info["stage1_params"] = _extract_pipeline_params(model._stage1)
-        if hasattr(model, "_stage2") and model._stage2 is not None:
-            info["stage2_params"] = _extract_pipeline_params(model._stage2)
-
-    # ── NetworkEGARCH regressors ──────────────────────────────────────
-    elif class_name in {"NetworkEGARCHRegressor", "NetworkEGARCHXRegressor"}:
-        info["p"] = model.p
-        info["o"] = model.o
-        info["q"] = model.q
-        info["horizon"] = model.horizon
-        info["scale"] = model.scale
-        info["stage2_alpha"] = model.stage2_alpha
-        info["correction_bound"] = model.correction_bound
-        info["use_clustering"] = model.use_clustering
-        if hasattr(model, "res_") and model.res_ is not None:
-            info["egarch_params"] = {
-                str(k): float(v) for k, v in model.res_.params.items()
-            }
-            if hasattr(model.res_, "aic"):
-                info["aic"] = float(model.res_.aic)
-            if hasattr(model.res_, "bic"):
-                info["bic"] = float(model.res_.bic)
         if hasattr(model, "_stage2") and model._stage2 is not None:
             info["stage2_params"] = _extract_pipeline_params(model._stage2)
 

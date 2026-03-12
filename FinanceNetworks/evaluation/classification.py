@@ -350,7 +350,6 @@ def main():
     from models.baselines_classification import (
         HARLogitClassifier,
         HARExtendedLogitClassifier,
-        EGARCHClassifier,
         RegimeSwitchingHARLogitClassifier,
     )
     from models.network_models_classification import (
@@ -427,11 +426,6 @@ def main():
             "HAR-Ext-Logit (C=1.0)":         (HARExtendedLogitClassifier(C=1.0),   False),
             "HAR-Ext-Logit (C=10.0)":        (HARExtendedLogitClassifier(C=10.0),  False),
             "HAR-Ext-Logit (C=1.0, no-out)": (HARExtendedLogitClassifier(C=1.0),   True),
-        },
-        "EGARCH-Logit": {
-            "EGARCH(1,1,1)-Logit":           (EGARCHClassifier(p=1, o=1, q=1, horizon=5), False),
-            "EGARCH(1,1,2)-Logit":           (EGARCHClassifier(p=1, o=1, q=2, horizon=5), False),
-            "EGARCH(2,1,1)-Logit":           (EGARCHClassifier(p=2, o=1, q=1, horizon=5), False),
         },
         "RegimeSwitching-Logit": {
             "RegHAR-Logit (p50)":            (RegimeSwitchingHARLogitClassifier(regime_percentile=0.5),  False),

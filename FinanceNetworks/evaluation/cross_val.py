@@ -1,5 +1,5 @@
 import copy
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing as mp
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
@@ -8,13 +8,11 @@ from typing import Any, Dict
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from models.baselines import (
     HARLogRegressor, HARExtendedLogRegressor, ARIMALogY, GARCHWeeklyRV,
-    EGARCHWeeklyRV, RegimeSwitchingHARLogRegressor,
+    RegimeSwitchingHARLogRegressor,
 )
 from models.network_models import (
     NetworkHARRegressor,
     NetworkVARRegressor,
-    NetworkEGARCHRegressor,
-    NetworkEGARCHXRegressor,
 )
 from data.preprocess import remove_outliers
 from evaluation.interpretability import extract_model_params, save_model_params, save_graph_snapshots
@@ -27,6 +25,10 @@ from visualize.print_results import (
     print_summary_excluding_outliers,
     load_and_print_results,
 )
+
+# Module-level data store.  Populated in cross_val_multi() before workers are
+# forked so that DataFrames are inherited copy-on-write — zero pickle cost.
+_CV_DATA: dict = {}
 
 
 def expanding_folds(
@@ -218,7 +220,7 @@ def run_benchmarks_multi_fold(
 
 def _run_single_benchmark_task(task: "dict[str, Any]") -> "dict[str, Any]":
     """Execute one (ticker, fold, model) benchmark task."""
-    feat = task["feat"]
+    feat = _CV_DATA[task["ticker"]]  # inherited via fork — no deserialisation cost
     train_idx = task["train_idx"]
     test_idx = task["test_idx"]
 
@@ -277,7 +279,7 @@ def cross_val_multi(
     min_train_size: int = 252 * 5,
     sample_tickers: "list[str] | None" = None,
     save_params: bool = False,
-    num_threads: int = 4,
+    num_threads: int = 16,
 ) -> "tuple[pd.DataFrame, dict, list] | tuple[pd.DataFrame, dict]":
     """
     Threaded expanding-window cross-validation with dynamic load balancing.
@@ -317,7 +319,9 @@ def cross_val_multi(
                     tasks.append(
                         {
                             "ticker": ticker,
-                            "feat": feat,
+                            # "feat" is intentionally omitted — workers look it
+                            # up from _CV_DATA (inherited via fork) so the
+                            # DataFrame is never serialised into individual tasks.
                             "fold_id": fold_id,
                             "train_idx": train_idx,
                             "test_idx": test_idx,
@@ -336,16 +340,21 @@ def cross_val_multi(
             return metrics_df, pred_store, params_store
         return metrics_df, pred_store
 
+    # Use fork-based multiprocessing to bypass the GIL.
+    # With "fork", child processes inherit _CV_DATA (set just above) via
+    # copy-on-write — the DataFrames are never pickled into the task queue.
+    global _CV_DATA
+    _CV_DATA = data_dict
+
     max_workers = max(1, int(num_threads))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_run_single_benchmark_task, task) for task in tasks]
-        for future in tqdm(
-            as_completed(futures),
-            total=len(futures),
+    ctx = mp.get_context("fork")
+    with ctx.Pool(processes=max_workers) as pool:
+        for result in tqdm(
+            pool.imap_unordered(_run_single_benchmark_task, tasks),
+            total=len(tasks),
             desc="CV tasks",
             unit="task",
         ):
-            result = future.result()
             rows.append(result["row"])
 
             pred_result = result["prediction"]
@@ -526,11 +535,6 @@ def main():
             "GARCH(2,3)":                 (GARCHWeeklyRV(p=2, q=3, horizon=5),              False),
             "GARCH(3,3)":                 (GARCHWeeklyRV(p=3, q=3, horizon=5),              False),
         },
-        "EGARCH": {
-            "EGARCH(1,1,1)": (EGARCHWeeklyRV(p=1, o=1, q=1, horizon=5), False),
-            "EGARCH(1,1,2)": (EGARCHWeeklyRV(p=1, o=1, q=2, horizon=5), False),
-            "EGARCH(2,1,1)": (EGARCHWeeklyRV(p=2, o=1, q=1, horizon=5), False),
-        },
         "RegimeSwitching": {
             "RegHAR (p50)": (RegimeSwitchingHARLogRegressor(regime_percentile=0.5), False),
             "RegHAR (p75)": (RegimeSwitchingHARLogRegressor(regime_percentile=0.75), False),
@@ -541,62 +545,28 @@ def main():
     def _network_models() -> Dict[str, Any]:
         """Return fresh network model instances (needed per k-value run)."""
         return {
-            "NetHAR (Lasso a=0.10)":     (NetworkHARRegressor(lasso_alpha=0.10),           False),
-            "NetHAR (Lasso a=0.05)":     (NetworkHARRegressor(lasso_alpha=0.05),           False),
-            "NetHAR (Lasso a=0.01)":     (NetworkHARRegressor(lasso_alpha=0.01),           False),
-            "NetHAR (OLS)":              (NetworkHARRegressor(lasso_alpha=0.0),             False),
-            "NetworkVAR (a=0.1, b=0.5)": (NetworkVARRegressor(stage2_alpha=0.1,
-                                                               correction_bound=0.5),      False),
-            "NetworkVAR (a=0.5, b=0.5)": (NetworkVARRegressor(stage2_alpha=0.5,
-                                                               correction_bound=0.5),      False),
-            "NetworkVAR (a=0.1, b=1.0)": (NetworkVARRegressor(stage2_alpha=0.1,
-                                                               correction_bound=1.0),      False),
-            "NetworkEGARCH (1,1,1)":     (NetworkEGARCHRegressor(p=1, o=1, q=1,
-                                                                   stage2_alpha=0.1,
-                                                                   correction_bound=0.5),   False),
-            "NetworkEGARCHX (1,1,1)":    (NetworkEGARCHXRegressor(p=1, o=1, q=1,
-                                                                    stage2_alpha=0.1,
-                                                                    correction_bound=0.5),  False),
-            "NetworkEGARCH (1,1,2)":     (NetworkEGARCHRegressor(p=1, o=1, q=2,
-                                                                   stage2_alpha=0.1,
-                                                                   correction_bound=0.5),   False),
-            "NetworkEGARCHX (1,1,2)":    (NetworkEGARCHXRegressor(p=1, o=1, q=2,
-                                                                    stage2_alpha=0.1,
-                                                                    correction_bound=0.5),  False),
+            "NetHAR (Lasso a=0.10)":          (NetworkHARRegressor(lasso_alpha=0.10),                                          False),
+            "NetHAR (Lasso a=0.05)":          (NetworkHARRegressor(lasso_alpha=0.05),                                          False),
+            "NetHAR (Lasso a=0.01)":          (NetworkHARRegressor(lasso_alpha=0.01),                                          False),
+            "NetHAR (OLS)":                   (NetworkHARRegressor(lasso_alpha=0.0),                                           False),
+            "NetworkVAR (a=0.1, b=0.5)":      (NetworkVARRegressor(stage2_alpha=0.1,  correction_bound=0.5),                   False),
+            "NetworkVAR (a=0.5, b=0.5)":      (NetworkVARRegressor(stage2_alpha=0.5,  correction_bound=0.5),                   False),
+            "NetworkVAR (a=0.1, b=1.0)":      (NetworkVARRegressor(stage2_alpha=0.1,  correction_bound=1.0),                   False),
         }
 
     def _network_models_clustering() -> Dict[str, Any]:
         """Network models with clustering features enabled."""
         return {
-            "NetHAR+C (Lasso a=0.10)":     (NetworkHARRegressor(lasso_alpha=0.10, use_clustering=True), False),
-            "NetHAR+C (Lasso a=0.05)":     (NetworkHARRegressor(lasso_alpha=0.05, use_clustering=True), False),
-            "NetHAR+C (Lasso a=0.01)":     (NetworkHARRegressor(lasso_alpha=0.01, use_clustering=True), False),
-            "NetHAR+C (OLS)":              (NetworkHARRegressor(lasso_alpha=0.0,  use_clustering=True), False),
-            "NetworkVAR+C (a=0.1, b=0.5)": (NetworkVARRegressor(stage2_alpha=0.1,
-                                                                  correction_bound=0.5,
-                                                                  use_clustering=True), False),
-            "NetworkVAR+C (a=0.5, b=0.5)": (NetworkVARRegressor(stage2_alpha=0.5,
-                                                                  correction_bound=0.5,
-                                                                  use_clustering=True), False),
-            "NetworkVAR+C (a=0.1, b=1.0)": (NetworkVARRegressor(stage2_alpha=0.1,
-                                                                  correction_bound=1.0,
-                                                                  use_clustering=True), False),
-            "NetworkEGARCH+C (1,1,1)":     (NetworkEGARCHRegressor(p=1, o=1, q=1,
-                                                                     stage2_alpha=0.1,
-                                                                     correction_bound=0.5,
-                                                                     use_clustering=True), False),
-            "NetworkEGARCHX+C (1,1,1)":    (NetworkEGARCHXRegressor(p=1, o=1, q=1,
-                                                                      stage2_alpha=0.1,
-                                                                      correction_bound=0.5,
-                                                                      use_clustering=True), False),
-            "NetworkEGARCH+C (1,1,2)":     (NetworkEGARCHRegressor(p=1, o=1, q=2,
-                                                                     stage2_alpha=0.1,
-                                                                     correction_bound=0.5,
-                                                                     use_clustering=True), False),
-            "NetworkEGARCHX+C (1,1,2)":    (NetworkEGARCHXRegressor(p=1, o=1, q=2,
-                                                                      stage2_alpha=0.1,
-                                                                      correction_bound=0.5,
-                                                                      use_clustering=True), False),
+            "NetHAR+C (Lasso a=0.10)":        (NetworkHARRegressor(lasso_alpha=0.10, use_clustering=True),                    False),
+            "NetHAR+C (Lasso a=0.05)":        (NetworkHARRegressor(lasso_alpha=0.05, use_clustering=True),                    False),
+            "NetHAR+C (Lasso a=0.01)":        (NetworkHARRegressor(lasso_alpha=0.01, use_clustering=True),                    False),
+            "NetHAR+C (OLS)":                 (NetworkHARRegressor(lasso_alpha=0.0,  use_clustering=True),                    False),
+            "NetworkVAR+C (a=0.1, b=0.5)":    (NetworkVARRegressor(stage2_alpha=0.1,  correction_bound=0.5,
+                                                                    use_clustering=True),                                      False),
+            "NetworkVAR+C (a=0.5, b=0.5)":    (NetworkVARRegressor(stage2_alpha=0.5,  correction_bound=0.5,
+                                                                    use_clustering=True),                                      False),
+            "NetworkVAR+C (a=0.1, b=1.0)":    (NetworkVARRegressor(stage2_alpha=0.1,  correction_bound=1.0,
+                                                                    use_clustering=True),                                      False),
         }
 
     # ── Run baselines ────────────────────────────────────────────────────────
@@ -859,7 +829,6 @@ def sanity_main():
     net_cat: Dict[str, Dict[str, Any]] = {
         f"Network [k={K_VAL}]": {
             "NetHAR (Lasso a=0.05)": (NetworkHARRegressor(lasso_alpha=0.05), False),
-            "NetworkEGARCH (1,1,1)": (NetworkEGARCHRegressor(p=1, o=1, q=1), False),
         }
     }
     print(f"\nRunning Network [k={K_VAL}] (squared-corr, inv)...")
@@ -873,7 +842,6 @@ def sanity_main():
     pc_cat: Dict[str, Dict[str, Any]] = {
         f"PCorr Network [k={K_VAL}]": {
             "NetHAR (Lasso a=0.05)": (NetworkHARRegressor(lasso_alpha=0.05), False),
-            "NetworkEGARCH (1,1,1)": (NetworkEGARCHRegressor(p=1, o=1, q=1), False),
         }
     }
     print(f"\nRunning PCorr Network [k={K_VAL}]...")
@@ -887,7 +855,6 @@ def sanity_main():
     ek_cat: Dict[str, Dict[str, Any]] = {
         f"ExpKernel [k={K_VAL}]": {
             "NetHAR (Lasso a=0.05)": (NetworkHARRegressor(lasso_alpha=0.05), False),
-            "NetworkEGARCH (1,1,1)": (NetworkEGARCHRegressor(p=1, o=1, q=1), False),
         }
     }
     print(f"\nRunning ExpKernel [k={K_VAL}]...")
@@ -901,7 +868,6 @@ def sanity_main():
     cl_cat: Dict[str, Dict[str, Any]] = {
         f"Clustering [k={K_VAL}]": {
             "NetHAR+C (Lasso a=0.05)": (NetworkHARRegressor(lasso_alpha=0.05, use_clustering=True), False),
-            "NetworkEGARCH+C (1,1,1)": (NetworkEGARCHRegressor(p=1, o=1, q=1, use_clustering=True), False),
         }
     }
     print(f"\nRunning Clustering [k={K_VAL}]...")
@@ -915,7 +881,6 @@ def sanity_main():
     ec_cat: Dict[str, Dict[str, Any]] = {
         f"Exp+Clustering [k={K_VAL}]": {
             "NetHAR+C (Lasso a=0.05)": (NetworkHARRegressor(lasso_alpha=0.05, use_clustering=True), False),
-            "NetworkEGARCH+C (1,1,1)": (NetworkEGARCHRegressor(p=1, o=1, q=1, use_clustering=True), False),
         }
     }
     print(f"\nRunning Exp+Clustering [k={K_VAL}]...")

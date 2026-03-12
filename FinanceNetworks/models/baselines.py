@@ -267,215 +267,43 @@ class GARCHWeeklyRV:
         x = X["Returns"].dropna() * self.scale
         am = arch_model(x, mean=self.mean, vol="GARCH", p=self.p, q=self.q, dist=self.dist)
         self.res_ = am.fit(disp="off")
-        # Store scaled eps^2 and sigma^2 history for use in predict().
-        self._eps2_hist   = list(self.res_.resid.values ** 2)
-        self._sigma2_hist = list(self.res_.conditional_volatility.values ** 2)
-        return self
-
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        params = self.res_.params
-        omega  = float(params["omega"])
-        alphas = [float(params[f"alpha[{i}]"]) for i in range(1, self.p + 1)]
-        betas  = [float(params[f"beta[{i}]"])  for i in range(1, self.q + 1)]
-
-        eps2_hist   = list(self._eps2_hist)
-        sigma2_hist = list(self._sigma2_hist)
-
-        returns_test = X["Returns"].fillna(0).values * self.scale
-        preds = np.empty(len(returns_test))
-
-        for i, r in enumerate(returns_test):
-            eps2_cur = r ** 2
-
-            # 1-step-ahead: exact GARCH recursion
-            eps2_with_cur = eps2_hist + [eps2_cur]
-            sigma2_1 = (
-                omega
-                + sum(alphas[a] * eps2_with_cur[-(a + 1)] for a in range(self.p))
-                + sum(betas[b]  * sigma2_hist[-(b + 1)]   for b in range(self.q))
-            )
-
-            # h-step-ahead: expectation propagation
-            future_s2 = [sigma2_1]
-            for k in range(1, self.horizon):
-                s2_k = omega
-                for a in range(self.p):
-                    fut_idx = k - a
-                    if fut_idx > 0:
-                        s2_k += alphas[a] * future_s2[fut_idx - 1]
-                    elif fut_idx == 0:
-                        s2_k += alphas[a] * eps2_cur
-                    else:
-                        s2_k += alphas[a] * eps2_with_cur[fut_idx - 1]
-                for b in range(self.q):
-                    fut_idx = k - b
-                    if fut_idx > 0:
-                        s2_k += betas[b] * future_s2[fut_idx - 1]
-                    elif fut_idx == 0:
-                        s2_k += betas[b] * sigma2_1
-                    else:
-                        s2_k += betas[b] * sigma2_hist[fut_idx - 1]
-                future_s2.append(s2_k)
-
-            # Sum horizon conditional variances; undo scale^2
-            preds[i] = sum(future_s2) / (self.scale ** 2)
-
-            # Update rolling history
-            eps2_hist.append(eps2_cur)
-            sigma2_hist.append(sigma2_1)
-
-        return preds
-
-
-# ---------------------------------------------------------------------------
-# EGARCH weekly RV forecast
-# ---------------------------------------------------------------------------
-
-class EGARCHWeeklyRV(BaseEstimator, RegressorMixin):
-    """
-    Faster EGARCH weekly-RV forecaster.
-
-    Key design choice
-    -----------------
-     We fit EGARCH once on the training slice, then freeze the parameters and
-     forecast the entire test block in one call by concatenating training and
-     observed test returns.  This preserves the intended rolling-origin setup
-     while avoiding an expensive model rebuild for every test row.
-
-    Notes
-    -----
-    - Assumes X["Returns"] at row t is known at forecast origin t, and the target
-      is future volatility from t+1 onward.
-    """
-
-    def __init__(
-        self,
-        p: int = 1,
-        o: int = 1,
-        q: int = 1,
-        dist: str = "normal",
-        mean: str = "zero",
-        scale: float = 1.0,
-        horizon: int = 5,
-        n_simulations: int = 500,
-    ):
-        self.p = p
-        self.o = o
-        self.q = q
-        self.dist = dist
-        self.mean = mean
-        self.scale = scale
-        self.horizon = horizon
-        self.n_simulations = n_simulations
-        self.res_ = None
-        self.features = ["log_RV1", "log_RV5", "log_RV22", "Returns"]
-        self._train_returns = None
-        self._params = None
-        self._arch_model_kwargs = {
-            "mean": self.mean,
-            "vol": "EGARCH",
-            "p": self.p,
-            "o": self.o,
-            "q": self.q,
-            "dist": self.dist,
-        }
-
-    def _make_model(self, series):
-        try:
-            from arch import arch_model
-        except ImportError as e:
-            raise ImportError(
-                "arch package not available. Install via: pip install arch"
-            ) from e
-
-        return arch_model(series, **self._arch_model_kwargs)
-
-    def _prepare_training_returns(self, X: pd.DataFrame) -> np.ndarray:
-        if "Returns" not in X.columns:
-            raise ValueError("X must contain a 'Returns' column.")
-
-        r = pd.to_numeric(X["Returns"], errors="coerce").dropna()
-        if len(r) < max(50, self.horizon + 10):
-            raise ValueError(
-                f"Not enough non-missing training returns for EGARCH: {len(r)} rows."
-            )
-
-        return r.astype(float).values * self.scale
-
-    def _prepare_predict_returns(self, X: pd.DataFrame) -> np.ndarray:
-        if "Returns" not in X.columns:
-            raise ValueError("X must contain a 'Returns' column.")
-
-        r_test = pd.to_numeric(X["Returns"], errors="coerce")
-        if r_test.isna().any():
-            bad = int(r_test.isna().sum())
-            raise ValueError(
-                f"X['Returns'] contains {bad} missing/non-numeric values. "
-                "Please clean them before calling predict()."
-            )
-
-        return r_test.astype(float).values * self.scale
-
-    def _fit_egarch(self, X: pd.DataFrame):
-        x = self._prepare_training_returns(X)
-        am = self._make_model(x)
-        self.res_ = am.fit(disp="off")
-        self._train_returns = x.copy()
+        # Store training returns and fitted params for efficient vectorised predict().
+        self._train_returns = x.values.copy()
         self._params = self.res_.params.copy()
         return self
 
-    def _align_forecast_matrix(self, var_matrix: np.ndarray, n_rows: int) -> np.ndarray:
-        if var_matrix.shape[0] == n_rows + 1:
-            return var_matrix[1:]
-        if var_matrix.shape[0] > n_rows:
-            return var_matrix[-n_rows:]
-        if var_matrix.shape[0] != n_rows:
-            raise RuntimeError(
-                f"Unexpected EGARCH forecast shape {var_matrix.shape}; expected {n_rows} rows."
-            )
-        return var_matrix
-
-    def _forecast_in_sample(self) -> np.ndarray:
-        if self.res_ is None:
-            raise RuntimeError("Call fit() before requesting EGARCH forecasts.")
-
-        fcst = self.res_.forecast(
-            horizon=self.horizon,
-            method="simulation",
-            simulations=self.n_simulations,
-            start=0,
-            reindex=False,
-        )
-        var_matrix = np.asarray(fcst.variance.values, dtype=float)
-        return var_matrix.sum(axis=1) / (self.scale ** 2)
-
-    def _forecast_out_of_sample(self, X: pd.DataFrame) -> np.ndarray:
-        if self.res_ is None or self._train_returns is None or self._params is None:
-            raise RuntimeError("Call fit() before predict().")
-
-        r_test = self._prepare_predict_returns(X)
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        # Concatenate training + test returns, fix the fitted parameters, and
+        # call arch's optimised analytic multi-step-ahead forecast in one shot.
+        # This replaces the old hand-written Python loop (O(T) interpreter
+        # iterations) with arch's internal C/Cython GARCH recursion, which is
+        # dramatically faster and holds the GIL far less.
+        from arch import arch_model
+        r_test = X["Returns"].fillna(0).values * self.scale
+        all_returns = np.concatenate([self._train_returns, r_test])
         n_train = len(self._train_returns)
         n_pred = len(r_test)
-        all_returns = np.concatenate([self._train_returns, r_test])
 
-        fixed = self._make_model(all_returns).fix(self._params)
+        fixed = arch_model(
+            all_returns, mean=self.mean, vol="GARCH",
+            p=self.p, q=self.q, dist=self.dist,
+        ).fix(self._params)
         fcst = fixed.forecast(
             horizon=self.horizon,
-            method="simulation",
-            simulations=self.n_simulations,
+            method="analytic",
             start=n_train - 1,
             reindex=False,
         )
 
         var_matrix = np.asarray(fcst.variance.values, dtype=float)
-        var_matrix = self._align_forecast_matrix(var_matrix, n_pred)
+        # arch may return n_pred or n_pred+1 rows depending on version; align.
+        if var_matrix.shape[0] == n_pred + 1:
+            var_matrix = var_matrix[1:]
+        elif var_matrix.shape[0] > n_pred:
+            var_matrix = var_matrix[-n_pred:]
+
+        # Sum horizon-step variances and undo scaling.
         return var_matrix.sum(axis=1) / (self.scale ** 2)
-
-    def fit(self, X: pd.DataFrame, y: pd.Series = None):
-        return self._fit_egarch(X)
-
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        return self._forecast_out_of_sample(X)
 
 
 # ---------------------------------------------------------------------------

@@ -27,7 +27,8 @@ def find_sp_top_n_stocks(n: int = 10):
         lines = f.read().splitlines()[2:]
     
     tickers = []
-    for l in lines[:n]:
+    for i in range(n):
+        l = lines[i]
         ticker = l.split("\t")[2]
         tickers.append(ticker)
     return tickers
@@ -35,7 +36,7 @@ def find_sp_top_n_stocks(n: int = 10):
 def check_exists_data(ticker_name: str):
     return (data_dir / f"{ticker_name}_data.csv").exists()
 
-def download_data(num_tickers: int = 10):
+def download_data_all(num_tickers: int = 10):
     tickers = find_sp_top_n_stocks(num_tickers)
     for ticker in tickers:
         if check_exists_data(ticker):
@@ -53,4 +54,4 @@ def get_data(num_tickers: int = 10):
     return data
 
 if __name__ == "__main__":
-    download_data(100)
+    download_data_all(100)
