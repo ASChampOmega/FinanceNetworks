@@ -67,9 +67,15 @@ from models.network_models import (
     NET_FEATURES,
     CLUSTERING_FEATURES,
     NET_FEATURES_FULL,
+    SIGN_SPLIT_IDW_FEATURES,
+    NET_FEATURES_SIGN_SPLIT,
+    NET_FEATURES_SIGN_SPLIT_FULL,
+    _ALL_NET_COLUMNS,
     _fill_net,
     _select_net_features,
     _dedupe_preserve_order,
+    _knn_rank_features,
+    _RANK_FEATURE_COLS,
 )
 
 
@@ -86,11 +92,12 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     )
 
 
-def _make_logit(C: float, max_iter: int) -> LogisticRegression:
+def _make_logit(C: float, max_iter: int, class_weight=None) -> LogisticRegression:
     return LogisticRegression(
         C=C,
         max_iter=max_iter,
         solver="lbfgs",
+        class_weight=class_weight,
     )
 
 
@@ -125,11 +132,15 @@ class NetworkHARClassifier(BaseEstimator, ClassifierMixin):
         C: float = 1.0,
         max_iter: int = 1_000,
         use_clustering: bool = False,
+        use_sign_split: bool = False,
+        class_weight=None,
     ):
         self.C = C
         self.max_iter = max_iter
         self.use_clustering = use_clustering
-        net_feats = _select_net_features(use_clustering)
+        self.use_sign_split = use_sign_split
+        self.class_weight = class_weight
+        net_feats = _select_net_features(use_clustering, use_sign_split)
         self.features: List[str] = HAR_FEATURES + net_feats
         self.model_: Optional[Pipeline] = None
 
@@ -138,7 +149,7 @@ class NetworkHARClassifier(BaseEstimator, ClassifierMixin):
         self.model_ = Pipeline(
             [
                 ("scaler", StandardScaler()),
-                ("clf", _make_logit(self.C, self.max_iter)),
+                ("clf", _make_logit(self.C, self.max_iter, self.class_weight)),
             ]
         )
         self.model_.fit(X_fit, y)
@@ -199,14 +210,18 @@ class NetworkVARClassifier(BaseEstimator, ClassifierMixin):
         stage2_alpha: float = 1.0,
         correction_bound: float = 2.0,
         use_clustering: bool = False,
+        use_sign_split: bool = False,
         max_iter: int = 1_000,
+        class_weight=None,
     ):
         self.C_stage1 = C_stage1
         self.stage2_alpha = stage2_alpha
         self.correction_bound = correction_bound
         self.use_clustering = use_clustering
+        self.use_sign_split = use_sign_split
         self.max_iter = max_iter
-        self._net_feats: List[str] = _select_net_features(use_clustering)
+        self.class_weight = class_weight
+        self._net_feats: List[str] = _select_net_features(use_clustering, use_sign_split)
         self.features: List[str] = HAR_FEATURES + self._net_feats
         self._stage1: Optional[Pipeline] = None
         self._stage2: Optional[Pipeline] = None
@@ -218,7 +233,7 @@ class NetworkVARClassifier(BaseEstimator, ClassifierMixin):
         self._stage1 = Pipeline(
             [
                 ("scaler", StandardScaler()),
-                ("clf", _make_logit(self.C_stage1, self.max_iter)),
+                ("clf", _make_logit(self.C_stage1, self.max_iter, self.class_weight)),
             ]
         )
         self._stage1.fit(X[HAR_FEATURES], y)
@@ -256,3 +271,127 @@ class NetworkVARClassifier(BaseEstimator, ClassifierMixin):
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+
+# ---------------------------------------------------------------------------
+# LearnedWeightNetworkHARClassifier  (learned m×k projection)
+# ---------------------------------------------------------------------------
+
+class LearnedWeightNetworkHARClassifier(BaseEstimator, ClassifierMixin):
+    """
+    Network classifier with a learned m×k weight matrix for neighbour aggregation.
+
+    Classification counterpart of ``LearnedWeightNetworkHARRegressor``.
+    Instead of using fixed IDW weights, this model sorts each ticker's k
+    nearest neighbours by ascending distance and applies a **shared** learned
+    weight matrix W (m × k) across all feature columns.  The weight matrix
+    is learned via truncated SVD, then the projected features are concatenated
+    with HAR features for logistic regression.
+
+    Parameters
+    ----------
+    k : int
+        Number of nearest neighbours (must match the graph's k).
+    m : int
+        Projection dimension.
+    C : float
+        Inverse regularisation strength for logistic regression.
+    max_iter : int
+        Solver iteration cap.
+    use_clustering : bool
+        Include global clustering features.
+    """
+
+    def __init__(
+        self,
+        k: int = 5,
+        m: int = 2,
+        C: float = 1.0,
+        max_iter: int = 1_000,
+        use_clustering: bool = False,
+        class_weight=None,
+    ):
+        self.k = k
+        self.m = m
+        self.C = C
+        self.max_iter = max_iter
+        self.use_clustering = use_clustering
+        self.class_weight = class_weight
+
+        # Build feature list
+        rank_feats = _knn_rank_features(k)
+        struct_feats = ["net_degree", "net_degree_change"]
+        if use_clustering:
+            struct_feats += CLUSTERING_FEATURES
+        self.features: List[str] = _dedupe_preserve_order(
+            HAR_FEATURES + struct_feats + rank_feats
+        )
+
+        self._W: Optional[np.ndarray] = None
+        self._pipe: Optional[Pipeline] = None
+        self._feat_cols: List[str] = _RANK_FEATURE_COLS
+        self._har_and_struct: List[str] = _dedupe_preserve_order(
+            HAR_FEATURES + struct_feats
+        )
+
+    def _extract_nn_tensor(self, X: pd.DataFrame) -> np.ndarray:
+        n = len(X)
+        n_f = len(self._feat_cols)
+        k = self.k
+        tensor = np.zeros((n, n_f, k))
+        for fi, fc in enumerate(self._feat_cols):
+            for r in range(k):
+                col = f"net_nn{r}_{fc}"
+                if col in X.columns:
+                    tensor[:, fi, r] = X[col].values
+        return tensor
+
+    def _learn_W(self, nn_tensor: np.ndarray) -> np.ndarray:
+        n, n_f, k = nn_tensor.shape
+        stacked = nn_tensor.reshape(n * n_f, k)
+        col_means = stacked.mean(axis=0)
+        stacked_c = stacked - col_means
+        try:
+            _, _, Vt = np.linalg.svd(stacked_c, full_matrices=False)
+        except np.linalg.LinAlgError:
+            W = np.zeros((self.m, k))
+            for i in range(min(self.m, k)):
+                W[i, i] = 1.0
+            return W
+        return Vt[:self.m]
+
+    def _project(self, nn_tensor: np.ndarray) -> np.ndarray:
+        Z = np.einsum("mk,nfk->nfm", self._W, nn_tensor)
+        return Z.reshape(len(nn_tensor), -1)
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "LearnedWeightNetworkHARClassifier":
+        X_filled = _fill_net(X)
+        nn_tensor = self._extract_nn_tensor(X_filled)
+        self._W = self._learn_W(nn_tensor)
+
+        Z = self._project(nn_tensor)
+        X_har = X_filled[self._har_and_struct].values
+        X_full = np.hstack([X_har, Z])
+
+        self._pipe = Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf", _make_logit(self.C, self.max_iter, self.class_weight)),
+        ])
+        self._pipe.fit(X_full, y)
+        return self
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        X_filled = _fill_net(X)
+        nn_tensor = self._extract_nn_tensor(X_filled)
+        Z = self._project(nn_tensor)
+        X_har = X_filled[self._har_and_struct].values
+        X_full = np.hstack([X_har, Z])
+        return self._pipe.predict(X_full)
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        X_filled = _fill_net(X)
+        nn_tensor = self._extract_nn_tensor(X_filled)
+        Z = self._project(nn_tensor)
+        X_har = X_filled[self._har_and_struct].values
+        X_full = np.hstack([X_har, Z])
+        return self._pipe.predict_proba(X_full)

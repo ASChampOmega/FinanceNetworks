@@ -25,14 +25,30 @@ def _super_category(cat: str) -> str:
     return re.sub(r"\s*\[k=\d+\]$", "", cat)
 
 
-def coalesce_categories(metrics_df: pd.DataFrame) -> pd.DataFrame:
+def coalesce_categories(
+    metrics_df: pd.DataFrame,
+    metric_col: str = "R2",
+    higher_is_better: bool = True,
+) -> pd.DataFrame:
     """
-    Merge k-variants into super-categories, keeping only the best
-    (category, model) pair per super-category (by pct_R2_pos).
+    Merge k-variants into super-categories, keeping **all models** from
+    the best k value per super-category.
 
-    For categories without a [k=N] suffix (e.g. HAR, ARIMA, GARCH) all rows
-    are kept unchanged.  For categories *with* a [k=N] suffix only the rows
-    of the winning (k, model) remain, relabelled to the super-category.
+    For categories without a ``[k=N]`` suffix (e.g. HAR, ARIMA, GARCH) all
+    rows are kept unchanged.  For categories *with* a ``[k=N]`` suffix the
+    best k value is selected (by the best individual model's mean metric
+    across tickers), then **every** model from that k is retained and
+    relabelled to the super-category.
+
+    Parameters
+    ----------
+    metrics_df       : DataFrame with at least Category, Ticker, Model,
+                       and *metric_col*.
+    metric_col       : Column used to rank models when selecting the best k
+                       (default ``"R2"``).  Use ``"ROC_AUC"`` for
+                       classification.
+    higher_is_better : ``True`` when a larger value is better (R2, ROC-AUC);
+                       ``False`` when lower is better (RMSE).
 
     Returns a copy of metrics_df with the Category column updated.
     """
@@ -51,32 +67,43 @@ def coalesce_categories(metrics_df: pd.DataFrame) -> pd.DataFrame:
         df["Category"] = df["_super"]
         return df.drop(columns="_super")
 
-    # For each k-bearing super-category pick the best (Category, Model) by
-    # pct_R2_pos, computed across tickers.
+    # Per-ticker mean of the metric for each (Category, Model)
     per_ticker = (
         df[df["_super"].isin(k_supers)]
-        .groupby(["Category", "Model", "Ticker"])["R2"]
+        .groupby(["Category", "Ticker", "Model"])[metric_col]
         .mean()
         .reset_index()
     )
-    pct = (
-        per_ticker.groupby(["Category", "Model"])
-        .agg(pct_R2_pos=("R2", lambda x: float((x > 0).mean())))
+    per_model = (
+        per_ticker.groupby(["Category", "Model"])[metric_col]
+        .mean()
         .reset_index()
     )
-    pct["_super"] = pct["Category"].map(_super_category)
 
-    best_pairs: dict = {}   # {super_cat: (original_category, model_name)}
-    for sc, grp in pct.groupby("_super"):
-        idx = grp["pct_R2_pos"].idxmax()
-        best_pairs[sc] = (grp.loc[idx, "Category"], grp.loc[idx, "Model"])
+    # For each Category (== a specific k), find the best model's score
+    agg_fn = "max" if higher_is_better else "min"
+    best_per_cat = (
+        per_model.groupby("Category")[metric_col]
+        .agg(agg_fn)
+        .reset_index()
+    )
+    best_per_cat["_super"] = best_per_cat["Category"].map(_super_category)
 
-    # Keep only the winning rows and relabel Category -> super-category
+    # For each super-category, pick the k whose best model wins
+    best_k_cat: dict = {}  # {super_cat: original_category}
+    for sc, grp in best_per_cat.groupby("_super"):
+        if higher_is_better:
+            idx = grp[metric_col].idxmax()
+        else:
+            idx = grp[metric_col].idxmin()
+        best_k_cat[sc] = grp.loc[idx, "Category"]
+
+    # Keep ALL rows from the winning k category per super-category
     keep_mask = pd.Series(True, index=df.index)
-    for sc, (orig_cat, best_model) in best_pairs.items():
+    for sc, orig_cat in best_k_cat.items():
         is_this_super = df["_super"] == sc
-        is_winner = (df["Category"] == orig_cat) & (df["Model"] == best_model)
-        keep_mask &= ~is_this_super | is_winner
+        is_best_k = df["Category"] == orig_cat
+        keep_mask &= ~is_this_super | is_best_k
 
     df = df[keep_mask].copy()
     df["Category"] = df["_super"]

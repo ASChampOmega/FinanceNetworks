@@ -28,6 +28,7 @@ def add_forward_rv_target_and_past_rv_features(
     returns_col: str = "Returns",
     horizon: int = 5,
     eps: float = 1e-8,
+    drop_na: bool = True,
 ) -> pd.DataFrame:
     """
     Creates:
@@ -109,16 +110,17 @@ def add_forward_rv_target_and_past_rv_features(
         "Y_fwd", "RV1", "RV5", "RV10", "RV22",
         "neg_semi_var5", "pos_semi_var5",
     ]
-    out = out.dropna(subset=required)
+    if drop_na:
+        out = out.dropna(subset=required)
     return out
 
 
-def preprocess_data(df: pd.DataFrame, lag_list: Optional[List[int]] = None):
+def preprocess_data(df: pd.DataFrame, lag_list: Optional[List[int]] = None, drop_na: bool=True):
     df = ensure_datetime(df)
     df = add_returns_column(df)
     if lag_list is not None:
         df = add_lag_features(df, lag_list)
-    df = add_forward_rv_target_and_past_rv_features(df)
+    df = add_forward_rv_target_and_past_rv_features(df, drop_na=drop_na)
     return df
 
 
@@ -131,24 +133,55 @@ def preprocess(data: dict, lag_list: Optional[List[int]] = None, preprocess_func
     return preprocessed_data
 
 
-def preprocess_df_for_har(df: pd.DataFrame, lag_list: Optional[List[int]] = None):
+def add_market_features(
+    df: pd.DataFrame,
+    market_returns: pd.Series,
+    eps: float = 1e-8,
+) -> pd.DataFrame:
+    """
+    Merge SPY market returns into a ticker DataFrame and compute market RV
+    features (Market_RV5, Market_RV22 and their log transforms).
+    """
+    df = df.copy()
+    # Align market returns onto the ticker's DatetimeIndex
+    df["Market_Returns"] = market_returns.reindex(df.index)
+    mr2 = df["Market_Returns"] ** 2
+    df["Market_RV5"]  = mr2.rolling(5).mean()
+    df["Market_RV22"] = mr2.rolling(22).mean()
+    df["log_Market_RV5"]  = np.log(df["Market_RV5"]  + eps)
+    df["log_Market_RV22"] = np.log(df["Market_RV22"] + eps)
+    return df
+
+
+def preprocess_df_for_har(
+    df: pd.DataFrame,
+    lag_list: Optional[List[int]] = None,
+    market_returns: Optional[pd.Series] = None,
+):
     """
     Preprocess a single ticker DataFrame for HAR-family models.
 
     No StandardScaler is applied here; see add_forward_rv_target_and_past_rv_features
     for the full explanation.  Scaling is handled inside each model Pipeline.
     """
-    df = preprocess_data(df, lag_list=lag_list)
+    df = preprocess_data(df, lag_list=lag_list, drop_na=False)
+    if market_returns is not None:
+        df = add_market_features(df, market_returns)
+    
+    df = df.dropna(subset=[
+        "Y_fwd", "RV1", "RV5", "RV10", "RV22",
+        "neg_semi_var5", "pos_semi_var5",
+    ])
     if df.empty or len(df) < 2:
         raise Exception("DataFrame is empty or too small after preprocessing.")
     return df
 
 
-def preprocess_for_har(data: dict, lag_list: Optional[List[int]] = None):
+def preprocess_for_har(data: dict, lag_list: Optional[List[int]] = None, market_returns: Optional[pd.Series] = None):
     result = {}
     for ticker, df in data.items():
         try:
-            processed = preprocess_df_for_har(df, lag_list=lag_list)
+            processed = preprocess_df_for_har(df, lag_list=lag_list, market_returns=market_returns)
             if processed.empty:
                 print(f"[preprocess_for_har] Skipping {ticker}: empty after preprocessing.")
                 continue

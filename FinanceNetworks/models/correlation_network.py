@@ -61,6 +61,7 @@ Recommended usage (offline, once per experiment)
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import warnings
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple
@@ -194,20 +195,59 @@ def _mutual_info_distance(arr: np.ndarray, n_bins: int = 10) -> np.ndarray:
     return dist
 
 
-def _partial_corr_distance(arr: np.ndarray, shrinkage: float = 0.1) -> np.ndarray:
+def _partial_corr_distance(
+    arr: np.ndarray,
+    shrinkage: float = 0.1,
+    large_n_threshold: int = 100,
+) -> np.ndarray:
     """
     d_ij = 1 - pcorr_ij^2
 
-    Partial correlations come from the precision matrix Omega = Sigma^{-1}:
-        pcorr_ij = -Omega_ij / sqrt(Omega_ii * Omega_jj)
+    Two code paths are used depending on the number of tickers *n_vars*:
 
-    Conditioning out all other stocks gives a measure of *direct* dependency.
-    The correlation matrix is regularised with diagonal shrinkage before
-    inversion; shrinkage is increased automatically when n_obs <= n_vars.
+    n_vars <= large_n_threshold  (exact)
+        Partial correlations come from the precision matrix Omega = Sigma^{-1}:
+            pcorr_ij = -Omega_ij / sqrt(Omega_ii * Omega_jj)
+        Conditioning out all other stocks gives a measure of *direct*
+        dependency.  The correlation is regularised with diagonal shrinkage
+        before inversion; shrinkage is increased when n_obs <= n_vars.
+
+    n_vars > large_n_threshold  (market-factor approximation)
+        For large universes (~500 stocks) the O(p^3) matrix inversion becomes
+        the bottleneck.  Instead we condition only on the equal-weighted
+        market factor m_t = mean_i(r_it) using the closed-form one-factor
+        partial correlation formula:
+
+            pcorr(i, j | m) = (rho_ij - rho_im * rho_jm)
+                              / sqrt((1 - rho_im^2)(1 - rho_jm^2))
+
+        This is O(p^2) and removes the dominant common-factor variation
+        (market beta) that drives most of the cross-sectional correlation in
+        a large equity universe, analogous to a one-factor Cholesky partial.
     """
-    corr = _safe_corr(arr)
     n_obs, n_vars = arr.shape
 
+    if n_vars > large_n_threshold:
+        # ── Fast path: condition on equal-weighted market factor ───────────
+        # rho_ij: full (n_vars x n_vars) correlation matrix
+        corr = _safe_corr(arr)
+        # Market return: equal-weighted average of all stocks in the window
+        mkt = arr.mean(axis=1, keepdims=True)            # (n_obs, 1)
+        combined = np.hstack([arr, mkt])                 # (n_obs, n_vars + 1)
+        corr_ext = _safe_corr(combined)                  # (n_vars+1, n_vars+1)
+        rho_im = corr_ext[:n_vars, n_vars]               # (n_vars,) stock-mkt corrs
+
+        # pcorr(i,j|m) = (rho_ij - rho_im * rho_jm)
+        #                / sqrt((1 - rho_im^2)(1 - rho_jm^2))
+        numer = corr - np.outer(rho_im, rho_im)
+        one_minus = np.clip(1.0 - rho_im ** 2, 1e-10, None)
+        denom = np.sqrt(np.outer(one_minus, one_minus))
+        pcorr = np.clip(numer / denom, -1.0 + 1e-8, 1.0 - 1e-8)
+        np.fill_diagonal(pcorr, 1.0)
+        return 1.0 - pcorr ** 2
+
+    # ── Exact path: precision-matrix partial correlations ─────────────────
+    corr = _safe_corr(arr)
     alpha = shrinkage if n_obs > n_vars else min(shrinkage + 0.2, 0.5)
     corr_reg = (1.0 - alpha) * corr + alpha * np.eye(n_vars)
 
@@ -270,6 +310,281 @@ def _build_knn_graph(dist_df: pd.DataFrame, k: int) -> nx.Graph:
     return G
 
 
+_GRAPH_BUILD_NETWORK: Optional["FinanceNetworkBase"] = None
+_GRAPH_BUILD_RETURNS_WIDE: Optional[pd.DataFrame] = None
+_GRAPH_BUILD_ALL_DATES: Optional[pd.Index] = None
+_GRAPH_FEATURE_NETWORK: Optional["FinanceNetworkBase"] = None
+_GRAPH_FEATURE_SNAPSHOTS: Optional[List[Tuple[pd.Timestamp, nx.Graph]]] = None
+_GRAPH_FEATURE_CORR_INFOS: Optional[List[Optional[Tuple[np.ndarray, List[str]]]]] = None
+_GRAPH_FEATURE_WIDE_AT_SNAPS: Optional[Dict[str, pd.DataFrame]] = None
+_GRAPH_FEATURE_DATA_TICKERS: Optional[List[str]] = None
+
+
+def _resolve_n_jobs(n_jobs: int) -> int:
+    """Normalise a job-count argument using sklearn-style semantics."""
+    if n_jobs == -1:
+        return max(1, mp.cpu_count())
+    if n_jobs < 1:
+        raise ValueError("n_jobs must be a positive integer or -1.")
+    return int(n_jobs)
+
+
+def _build_single_snapshot(
+    net: "FinanceNetworkBase",
+    returns_wide: pd.DataFrame,
+    all_dates: pd.Index,
+    date: pd.Timestamp,
+    loc: int,
+) -> Optional[dict]:
+    """Build one graph snapshot and its summary statistics."""
+    window_ret = returns_wide.iloc[loc - net.window + 1 : loc + 1]
+
+    ok = window_ret.columns[window_ret.notna().mean() >= net.min_obs_frac]
+    if len(ok) < net.min_tickers:
+        return None
+
+    window_ret = window_ret[ok].fillna(0.0)
+    dist_df = net._compute_distance_matrix(window_ret)
+    G = net._build_graph(dist_df)
+
+    corr_mat = _safe_corr(window_ret.values.astype(float))
+    n_t = corr_mat.shape[0]
+    if n_t > 1:
+        upper = np.abs(corr_mat[np.triu_indices(n_t, k=1)])
+        avg_abs_corr = float(upper.mean())
+    else:
+        avg_abs_corr = 0.0
+
+    return {
+        "date": pd.Timestamp(date),
+        "loc": int(loc),
+        "graph": G,
+        "avg_abs_corr": avg_abs_corr,
+        "corr_mat": corr_mat,
+        "corr_tickers": window_ret.columns.tolist(),
+    }
+
+
+def _build_single_snapshot_from_globals(task: tuple[pd.Timestamp, int]) -> dict:
+    """Fork-worker entry point for building one snapshot."""
+    if _GRAPH_BUILD_NETWORK is None:
+        raise RuntimeError("Graph-build worker has not been initialised.")
+    if _GRAPH_BUILD_RETURNS_WIDE is None or _GRAPH_BUILD_ALL_DATES is None:
+        raise RuntimeError("Graph-build worker is missing shared returns data.")
+
+    date, loc = task
+    try:
+        snapshot = _build_single_snapshot(
+            _GRAPH_BUILD_NETWORK,
+            _GRAPH_BUILD_RETURNS_WIDE,
+            _GRAPH_BUILD_ALL_DATES,
+            date,
+            loc,
+        )
+        return {
+            "date": pd.Timestamp(date),
+            "loc": int(loc),
+            "snapshot": snapshot,
+            "warning": None,
+        }
+    except Exception as exc:
+        return {
+            "date": pd.Timestamp(date),
+            "loc": int(loc),
+            "snapshot": None,
+            "warning": str(exc),
+        }
+
+
+def _compute_snapshot_feature_records(
+    net: "FinanceNetworkBase",
+    date: pd.Timestamp,
+    graph: nx.Graph,
+    prev_graph: Optional[nx.Graph],
+    corr_info: Optional[Tuple[np.ndarray, List[str]]],
+    wide_at_snaps: Dict[str, pd.DataFrame],
+    data_tickers: List[str],
+    avg_abs_corr: float,
+) -> Dict[str, Dict[str, float]]:
+    """Compute all per-ticker feature records for one snapshot date."""
+    recs: Dict[str, Dict[str, float]] = {}
+    k = net.k
+
+    global_clustering = (
+        float(nx.average_clustering(graph)) if graph.number_of_edges() > 0 else 0.0
+    )
+    node_clustering = nx.clustering(graph)
+
+    corr_lookup = None
+    if corr_info is not None:
+        corr_mat_snap, corr_tickers_snap = corr_info
+        corr_lookup = (corr_mat_snap, {t: i for i, t in enumerate(corr_tickers_snap)})
+
+    for ticker in data_tickers:
+        if ticker not in graph.nodes:
+            continue
+
+        deg = int(graph.degree(ticker))
+        current_nb = set(graph.neighbors(ticker))
+        prev_nb = None
+        if prev_graph is not None and ticker in prev_graph.nodes:
+            prev_nb = set(prev_graph.neighbors(ticker))
+
+        deg_change = (
+            1.0 - len(prev_nb & current_nb) / max(1, len(current_nb))
+            if prev_nb is not None
+            else np.nan
+        )
+
+        rec: Dict[str, float] = {
+            "net_degree": float(deg),
+            "net_degree_change": deg_change,
+            "net_node_clustering": float(node_clustering.get(ticker, 0.0)),
+            "net_global_clustering": global_clustering,
+            "net_avg_abs_corr": avg_abs_corr,
+        }
+
+        neighbours = list(current_nb)
+        nb_dists = [
+            (nb, graph[ticker][nb].get("weight", 1.0))
+            for nb in neighbours
+        ]
+        nb_dists.sort(key=lambda x: x[1])
+
+        nb_positive: set = set()
+        if corr_lookup is not None:
+            corr_mat_snap, ticker_to_idx = corr_lookup
+            ti = ticker_to_idx.get(ticker)
+            if ti is not None:
+                for nb in neighbours:
+                    ni = ticker_to_idx.get(nb)
+                    if ni is not None and corr_mat_snap[ti, ni] > 0:
+                        nb_positive.add(nb)
+        else:
+            nb_positive = set(neighbours)
+
+        for col, wf in wide_at_snaps.items():
+            feat_key = f"net_idw_{col}"
+            feat_key_pos = f"net_idw_pos_{col}"
+            feat_key_neg = f"net_idw_neg_{col}"
+
+            if not neighbours:
+                rec[feat_key] = np.nan
+                rec[feat_key_pos] = np.nan
+                rec[feat_key_neg] = np.nan
+                for r in range(k):
+                    rec[f"net_nn{r}_{col}"] = np.nan
+                continue
+
+            wf_row = wf.loc[date]
+            vals, weights = [], []
+            pos_vals, pos_weights = [], []
+            neg_vals, neg_weights = [], []
+
+            for nb in neighbours:
+                if nb not in wf_row.index:
+                    continue
+                val = wf_row[nb]
+                if not pd.notna(val):
+                    continue
+                raw_w = graph[ticker][nb].get("weight", 1.0)
+                if net.idw_kernel == "exp":
+                    w = np.exp(-net.exp_lambda * raw_w)
+                else:
+                    w = 1.0 / max(raw_w, 1e-8)
+                fval = float(val)
+                vals.append(fval)
+                weights.append(w)
+                if nb in nb_positive:
+                    pos_vals.append(fval)
+                    pos_weights.append(w)
+                else:
+                    neg_vals.append(fval)
+                    neg_weights.append(w)
+
+            if vals:
+                w_arr = np.array(weights)
+                rec[feat_key] = float(np.dot(w_arr, vals) / w_arr.sum())
+            else:
+                rec[feat_key] = np.nan
+
+            if pos_vals:
+                w_arr = np.array(pos_weights)
+                rec[feat_key_pos] = float(np.dot(w_arr, pos_vals) / w_arr.sum())
+            else:
+                rec[feat_key_pos] = np.nan
+
+            if neg_vals:
+                w_arr = np.array(neg_weights)
+                rec[feat_key_neg] = float(np.dot(w_arr, neg_vals) / w_arr.sum())
+            else:
+                rec[feat_key_neg] = np.nan
+
+            for r in range(k):
+                if r < len(nb_dists):
+                    nb_r, _ = nb_dists[r]
+                    if nb_r in wf_row.index and pd.notna(wf_row[nb_r]):
+                        rec[f"net_nn{r}_{col}"] = float(wf_row[nb_r])
+                    else:
+                        rec[f"net_nn{r}_{col}"] = np.nan
+                else:
+                    rec[f"net_nn{r}_{col}"] = np.nan
+
+        for r in range(k):
+            if r < len(nb_dists):
+                rec[f"net_nn{r}_dist"] = float(nb_dists[r][1])
+            else:
+                rec[f"net_nn{r}_dist"] = np.nan
+
+        recs[ticker] = rec
+
+    return recs
+
+
+def _compute_snapshot_feature_records_from_globals(snapshot_idx: int) -> dict:
+    """Fork-worker entry point for one snapshot's feature extraction."""
+    if _GRAPH_FEATURE_NETWORK is None:
+        raise RuntimeError("Feature worker has not been initialised.")
+    if _GRAPH_FEATURE_SNAPSHOTS is None:
+        raise RuntimeError("Feature worker is missing snapshots.")
+    if _GRAPH_FEATURE_CORR_INFOS is None:
+        raise RuntimeError("Feature worker is missing correlation state.")
+    if _GRAPH_FEATURE_WIDE_AT_SNAPS is None:
+        raise RuntimeError("Feature worker is missing aligned feature tables.")
+    if _GRAPH_FEATURE_DATA_TICKERS is None:
+        raise RuntimeError("Feature worker is missing ticker metadata.")
+
+    date, graph = _GRAPH_FEATURE_SNAPSHOTS[snapshot_idx]
+    prev_graph = None if snapshot_idx == 0 else _GRAPH_FEATURE_SNAPSHOTS[snapshot_idx - 1][1]
+    corr_info = _GRAPH_FEATURE_CORR_INFOS[snapshot_idx]
+    avg_abs_corr = _GRAPH_FEATURE_NETWORK._snap_avg_abs_corr.get(date, 0.0)
+
+    try:
+        recs = _compute_snapshot_feature_records(
+            _GRAPH_FEATURE_NETWORK,
+            date,
+            graph,
+            prev_graph,
+            corr_info,
+            _GRAPH_FEATURE_WIDE_AT_SNAPS,
+            _GRAPH_FEATURE_DATA_TICKERS,
+            avg_abs_corr,
+        )
+        return {
+            "idx": snapshot_idx,
+            "date": date,
+            "recs": recs,
+            "warning": None,
+        }
+    except Exception as exc:
+        return {
+            "idx": snapshot_idx,
+            "date": date,
+            "recs": None,
+            "warning": str(exc),
+        }
+
+
 # ---------------------------------------------------------------------------
 # Abstract base class
 # ---------------------------------------------------------------------------
@@ -305,6 +620,9 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
         window to be included in that snapshot's graph.
     min_tickers : int
         Skip a snapshot entirely if fewer tickers pass the min_obs_frac filter.
+    n_jobs : int
+        Number of worker processes used to build snapshots. Use 1 to keep the
+        build sequential, or -1 to use all CPU cores.
     """
 
     _GRAPH_BUILDERS = {"threshold", "knn"}
@@ -324,6 +642,8 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
         min_tickers: int = 10,
         idw_kernel: str = "inv",
         exp_lambda: float = 5.0,
+        save_step: Optional[int] = None,
+        n_jobs: int = 1,
     ):
         if graph_type not in self._GRAPH_BUILDERS:
             raise ValueError(
@@ -346,16 +666,24 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
         self.min_tickers  = min_tickers
         self.idw_kernel   = idw_kernel
         self.exp_lambda   = exp_lambda
+        self.save_step    = save_step  # if None, defaults to step
+        self.n_jobs       = n_jobs
 
         # Populated by fit()
         self.tickers_: List[str] = []
-        # Ordered list of (rebuild_date, nx.Graph).  The graph at index i covers
-        # returns ending on rebuild_date[i]; features are forward-filled to the
-        # next rebuild date.
+        # ALL snapshots built at *step* intervals -- used by transform() for
+        # feature extraction so every rebuild date has fresh network features.
+        self._all_snapshots: List[Tuple[pd.Timestamp, nx.Graph]] = []
+        # Subset saved for interpretability / disk persistence at *save_step*
+        # intervals.  Used by save_graph_snapshots() and n_snapshots_.
         self._snapshots: List[Tuple[pd.Timestamp, nx.Graph]] = []
         # Per-snapshot mean absolute correlation across all pairs (scalar,
-        # shared across all stocks).  Stored alongside the graph snapshots.
+        # shared across all stocks).  Stored for ALL snapshots (cheap).
         self._snap_avg_abs_corr: Dict[pd.Timestamp, float] = {}
+        # Per-snapshot raw correlation matrix + ticker list, used by
+        # transform() to split IDW into positive/negative-correlation groups.
+        # Stored only at *save_step* intervals to save memory.
+        self._snap_corr_matrices: Dict[pd.Timestamp, Tuple[np.ndarray, List[str]]] = {}
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -449,41 +777,98 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
             )
 
         # ── 2. Rolling graph construction ──────────────────────────────
+        self._all_snapshots = []
         self._snapshots = []
+        self._snap_avg_abs_corr = {}
+        self._snap_corr_matrices = {}
+        effective_save_step = self.save_step if self.save_step is not None else self.step
         rebuild_dates = all_dates[self.window - 1 :: self.step]
+        save_stride = max(1, effective_save_step // max(1, self.step))
+        tasks = [(pd.Timestamp(date), int(all_dates.get_loc(date))) for date in rebuild_dates]
 
-        for date in tqdm(
-            rebuild_dates,
-            desc=f"Fitting {type(self).__name__} [window={self.window}, {self.graph_type}]",
-            unit="snap",
-        ):
-            loc = all_dates.get_loc(date)
-            window_ret = returns_wide.iloc[loc - self.window + 1 : loc + 1]
+        # Track which rebuild dates to mark as "saved" for interpretability.
+        # Every save_step-th date (relative to the first valid date) is saved.
+        save_counter = 0
 
-            ok = window_ret.columns[
-                window_ret.notna().mean() >= self.min_obs_frac
-            ]
-            if len(ok) < self.min_tickers:
+        desc = f"Fitting {type(self).__name__} [window={self.window}, {self.graph_type}]"
+        n_jobs = _resolve_n_jobs(self.n_jobs)
+        snapshot_results: List[dict] = []
+
+        can_fork = "fork" in mp.get_all_start_methods()
+        use_parallel = n_jobs > 1 and len(tasks) > 1 and can_fork
+        if n_jobs > 1 and not can_fork:
+            warnings.warn(
+                "Parallel graph building requires the 'fork' start method; falling back to sequential mode."
+            )
+
+        if use_parallel:
+            global _GRAPH_BUILD_NETWORK, _GRAPH_BUILD_RETURNS_WIDE, _GRAPH_BUILD_ALL_DATES
+            _GRAPH_BUILD_NETWORK = self
+            _GRAPH_BUILD_RETURNS_WIDE = returns_wide
+            _GRAPH_BUILD_ALL_DATES = all_dates
+
+            ctx = mp.get_context("fork")
+            chunksize = max(1, len(tasks) // max(1, n_jobs * 4))
+            with ctx.Pool(processes=n_jobs) as pool:
+                for result in tqdm(
+                    pool.imap_unordered(_build_single_snapshot_from_globals, tasks, chunksize=chunksize),
+                    total=len(tasks),
+                    desc=desc,
+                    unit="snap",
+                ):
+                    snapshot_results.append(result)
+
+            _GRAPH_BUILD_NETWORK = None
+            _GRAPH_BUILD_RETURNS_WIDE = None
+            _GRAPH_BUILD_ALL_DATES = None
+            snapshot_results.sort(key=lambda x: x["loc"])
+        else:
+            for date, loc in tqdm(tasks, desc=desc, unit="snap"):
+                try:
+                    snapshot = _build_single_snapshot(self, returns_wide, all_dates, date, loc)
+                    snapshot_results.append(
+                        {
+                            "date": pd.Timestamp(date),
+                            "loc": int(loc),
+                            "snapshot": snapshot,
+                            "warning": None,
+                        }
+                    )
+                except Exception as exc:
+                    snapshot_results.append(
+                        {
+                            "date": pd.Timestamp(date),
+                            "loc": int(loc),
+                            "snapshot": None,
+                            "warning": str(exc),
+                        }
+                    )
+
+        for result in snapshot_results:
+            date = result["date"]
+            warning_msg = result.get("warning")
+            if warning_msg:
+                warnings.warn(f"Snapshot at {date.date()} skipped: {warning_msg}")
                 continue
 
-            window_ret = window_ret[ok].fillna(0.0)
+            snapshot = result.get("snapshot")
+            if snapshot is None:
+                continue
 
-            try:
-                dist_df = self._compute_distance_matrix(window_ret)
-                G = self._build_graph(dist_df)
-                self._snapshots.append((date, G))
-                # Mean |correlation| across all unique pairs in this window
-                corr_mat = _safe_corr(window_ret.values.astype(float))
-                n_t = corr_mat.shape[0]
-                if n_t > 1:
-                    upper = np.abs(corr_mat[np.triu_indices(n_t, k=1)])
-                    self._snap_avg_abs_corr[date] = float(upper.mean())
-                else:
-                    self._snap_avg_abs_corr[date] = 0.0
-            except Exception as exc:
-                warnings.warn(f"Snapshot at {date.date()} skipped: {exc}")
+            graph = snapshot["graph"]
+            corr_mat = snapshot["corr_mat"]
+            self._all_snapshots.append((date, graph))
+            self._snap_avg_abs_corr[date] = snapshot["avg_abs_corr"]
 
-        if not self._snapshots:
+            if save_counter % save_stride == 0:
+                self._snapshots.append((date, graph))
+                self._snap_corr_matrices[date] = (
+                    corr_mat,
+                    snapshot["corr_tickers"],
+                )
+            save_counter += 1
+
+        if not self._all_snapshots:
             raise RuntimeError(
                 "No valid graph snapshots were built.  "
                 "Check window size, min_tickers, and data coverage."
@@ -521,6 +906,13 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
               sum_j w_j * col_j(t)  /  sum_j w_j,   w_j = 1 / d_ij
             Uses the neighbour's own-date value (past RV, not future).
 
+        net_nn{r}_{col} : float   (one per rank r in 0..k-1, per feature_col)
+            Value of the r-th nearest neighbour's feature *col*, where
+            neighbours are sorted by ascending distance.
+
+        net_nn{r}_dist : float   (one per rank r in 0..k-1)
+            Distance to the r-th nearest neighbour.
+
         Performance note
         ----------------
         Before iterating over snapshots, the feature columns are pre-aligned
@@ -528,14 +920,13 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
         This avoids O(T) linear scans inside the inner neighbour loop, giving
         O(1) lookup per (snapshot, ticker, neighbour, feature_col).
         """
-        if not self._snapshots:
+        if not self._all_snapshots:
             raise RuntimeError("Call fit() before transform().")
 
-        snap_dates = pd.DatetimeIndex([d for d, _ in self._snapshots])
+        # Use _all_snapshots for feature extraction (every rebuild date)
+        snap_dates = pd.DatetimeIndex([d for d, _ in self._all_snapshots])
 
         # ── Pre-compute IDW lookup tables ──────────────────────────────
-        # For each feature_col: wide (dates x tickers) --> ffill --> reindex
-        # to snapshot dates so lookup is simply wf_snaps.loc[date, ticker].
         wide_at_snaps: Dict[str, pd.DataFrame] = {}
         for col in self.feature_cols:
             sdict = {}
@@ -547,95 +938,120 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
                 sdict[ticker] = pd.Series(df[col].values, index=idx, name=ticker)
             if not sdict:
                 continue
-            # Build full wide matrix, forward-fill, then snap to rebuild dates
             wide = pd.DataFrame(sdict).sort_index()
-            # Union of all ticker dates plus snap dates so ffill can propagate
             combined = wide.reindex(
                 wide.index.union(snap_dates).sort_values()
             ).ffill()
             wide_at_snaps[col] = combined.reindex(snap_dates)
 
-        # ── Compute per-snapshot per-ticker feature records ────────────
+        # ── Column names ───────────────────────────────────────────────
+        k = self.k
         all_net_cols = (
             ["net_degree", "net_degree_change",
              "net_node_clustering", "net_global_clustering",
              "net_avg_abs_corr"]
             + [f"net_idw_{c}" for c in self.feature_cols]
+            + [f"net_idw_pos_{c}" for c in self.feature_cols]
+            + [f"net_idw_neg_{c}" for c in self.feature_cols]
+            + [f"net_nn{r}_{c}" for r in range(k) for c in self.feature_cols]
+            + [f"net_nn{r}_dist" for r in range(k)]
         )
 
+        # ── Compute per-snapshot per-ticker feature records ────────────
         snap_records: Dict[pd.Timestamp, Dict[str, Dict[str, float]]] = {}
-        prev_neighbors: Dict[str, set] = {}   # stores N_{i,t-1} for each ticker
+        corr_infos: List[Optional[Tuple[np.ndarray, List[str]]]] = []
+        last_corr_info: Optional[Tuple[np.ndarray, List[str]]] = None
+        for date, _ in self._all_snapshots:
+            if date in self._snap_corr_matrices:
+                last_corr_info = self._snap_corr_matrices[date]
+            corr_infos.append(last_corr_info)
 
-        for date, G in self._snapshots:
-            recs: Dict[str, Dict[str, float]] = {}
+        snapshot_tasks = list(range(len(self._all_snapshots)))
+        desc = f"Transforming {type(self).__name__} features"
+        n_jobs = _resolve_n_jobs(self.n_jobs)
+        feature_results: List[dict] = []
 
-            # Graph-level features (shared across all stocks in this snapshot)
-            global_clustering = float(nx.average_clustering(G)) if G.number_of_edges() > 0 else 0.0
-            avg_abs_corr = self._snap_avg_abs_corr.get(date, 0.0)
-            node_clustering = nx.clustering(G)  # dict {node: cc}
+        can_fork = "fork" in mp.get_all_start_methods()
+        use_parallel = n_jobs > 1 and len(snapshot_tasks) > 1 and can_fork
+        if n_jobs > 1 and not can_fork:
+            warnings.warn(
+                "Parallel feature extraction requires the 'fork' start method; falling back to sequential mode."
+            )
 
-            for ticker in data_dict:
-                if ticker not in G.nodes:
-                    continue
+        if use_parallel:
+            global _GRAPH_FEATURE_NETWORK
+            global _GRAPH_FEATURE_SNAPSHOTS
+            global _GRAPH_FEATURE_CORR_INFOS
+            global _GRAPH_FEATURE_WIDE_AT_SNAPS
+            global _GRAPH_FEATURE_DATA_TICKERS
 
-                deg = int(G.degree(ticker))
-                current_nb = set(G.neighbors(ticker))
-                prev_nb = prev_neighbors.get(ticker)
+            _GRAPH_FEATURE_NETWORK = self
+            _GRAPH_FEATURE_SNAPSHOTS = self._all_snapshots
+            _GRAPH_FEATURE_CORR_INFOS = corr_infos
+            _GRAPH_FEATURE_WIDE_AT_SNAPS = wide_at_snaps
+            _GRAPH_FEATURE_DATA_TICKERS = list(data_dict.keys())
 
-                # Neighborhood turnover (Jaccard-recall style):
-                #   1 - |N_{t-1} ∩ N_t| / max(1, |N_t|)
-                # 0 = identical neighbourhood (stable),
-                # 1 = complete rewiring (no shared neighbours).
-                # NaN at the very first snapshot of each ticker.
-                deg_change = (
-                    1.0 - len(prev_nb & current_nb) / max(1, len(current_nb))
-                    if prev_nb is not None
-                    else np.nan
-                )
+            ctx = mp.get_context("fork")
+            chunksize = max(1, len(snapshot_tasks) // max(1, n_jobs * 4))
+            with ctx.Pool(processes=n_jobs) as pool:
+                for result in tqdm(
+                    pool.imap_unordered(
+                        _compute_snapshot_feature_records_from_globals,
+                        snapshot_tasks,
+                        chunksize=chunksize,
+                    ),
+                    total=len(snapshot_tasks),
+                    desc=desc,
+                    unit="snap",
+                ):
+                    feature_results.append(result)
 
-                rec: Dict[str, float] = {
-                    "net_degree":            float(deg),
-                    "net_degree_change":     deg_change,
-                    "net_node_clustering":   float(node_clustering.get(ticker, 0.0)),
-                    "net_global_clustering": global_clustering,
-                    "net_avg_abs_corr":      avg_abs_corr,
-                }
+            _GRAPH_FEATURE_NETWORK = None
+            _GRAPH_FEATURE_SNAPSHOTS = None
+            _GRAPH_FEATURE_CORR_INFOS = None
+            _GRAPH_FEATURE_WIDE_AT_SNAPS = None
+            _GRAPH_FEATURE_DATA_TICKERS = None
+            feature_results.sort(key=lambda x: x["idx"])
+        else:
+            for snapshot_idx in tqdm(snapshot_tasks, desc=desc, unit="snap"):
+                date, graph = self._all_snapshots[snapshot_idx]
+                prev_graph = None if snapshot_idx == 0 else self._all_snapshots[snapshot_idx - 1][1]
+                try:
+                    recs = _compute_snapshot_feature_records(
+                        self,
+                        date,
+                        graph,
+                        prev_graph,
+                        corr_infos[snapshot_idx],
+                        wide_at_snaps,
+                        list(data_dict.keys()),
+                        self._snap_avg_abs_corr.get(date, 0.0),
+                    )
+                    feature_results.append(
+                        {
+                            "idx": snapshot_idx,
+                            "date": date,
+                            "recs": recs,
+                            "warning": None,
+                        }
+                    )
+                except Exception as exc:
+                    feature_results.append(
+                        {
+                            "idx": snapshot_idx,
+                            "date": date,
+                            "recs": None,
+                            "warning": str(exc),
+                        }
+                    )
 
-                neighbours = list(G.neighbors(ticker))
-                for col, wf in wide_at_snaps.items():
-                    feat_key = f"net_idw_{col}"
-                    if not neighbours:
-                        rec[feat_key] = np.nan
-                        continue
-
-                    vals, weights = [], []
-                    for nb in neighbours:
-                        if nb not in wf.columns:
-                            continue
-                        val = wf.loc[date, nb]   # O(1) -- pre-aligned above
-                        if not pd.notna(val):
-                            continue
-                        raw_w = G[ticker][nb].get("weight", 1.0)
-                        if self.idw_kernel == "exp":
-                            w = np.exp(-self.exp_lambda * raw_w)
-                        else:
-                            w = 1.0 / max(raw_w, 1e-8)
-                        vals.append(float(val))
-                        weights.append(w)
-
-                    if vals:
-                        w_arr = np.array(weights)
-                        rec[feat_key] = float(np.dot(w_arr, vals) / w_arr.sum())
-                    else:
-                        rec[feat_key] = np.nan
-
-                recs[ticker] = rec
-
-            snap_records[date] = recs
-            # Update previous-neighbour sets for next snapshot
-            for ticker in recs:
-                if ticker in G.nodes:
-                    prev_neighbors[ticker] = set(G.neighbors(ticker))
+        for result in feature_results:
+            date = result["date"]
+            warning_msg = result.get("warning")
+            if warning_msg:
+                warnings.warn(f"Feature extraction at {date.date()} skipped: {warning_msg}")
+                continue
+            snap_records[date] = result["recs"] or {}
 
         # ── Stitch snapshot records into per-ticker DataFrames ─────────
         result: Dict[str, pd.DataFrame] = {}
@@ -651,8 +1067,6 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
             snap_df = pd.DataFrame(rows).set_index("_date")
             snap_df.index = pd.to_datetime(snap_df.index)
 
-            # Reindex to the ticker's full date grid and forward-fill between
-            # rebuild dates.  Rows before the first snapshot remain NaN.
             full_idx = df_out.index.union(snap_df.index).sort_values()
             snap_aligned = snap_df.reindex(full_idx).ffill().reindex(df_out.index)
 
@@ -722,8 +1136,13 @@ class FinanceNetworkBase(BaseEstimator, TransformerMixin, ABC):
 
     @property
     def n_snapshots_(self) -> int:
-        """Number of graph snapshots built during fit()."""
+        """Number of saved graph snapshots (for interpretability / disk)."""
         return len(self._snapshots)
+
+    @property
+    def n_all_snapshots_(self) -> int:
+        """Total number of graph snapshots built during fit() (used for features)."""
+        return len(self._all_snapshots)
 
     def snapshot_degrees(self) -> pd.DataFrame:
         """
@@ -799,17 +1218,23 @@ class PartialCorrelationNetwork(FinanceNetworkBase):
     shrinkage : float in (0, 1)
         Ledoit-Wolf-style diagonal regularisation strength.  Increase if the
         precision matrix is ill-conditioned or if n_obs is close to n_tickers.
+    large_n_threshold : int
+        When the number of tickers in a snapshot exceeds this value, switch
+        from the exact O(p^3) precision-matrix method to the O(p^2)
+        market-factor partial correlation approximation.  Default: 100.
     """
 
-    def __init__(self, *args, shrinkage: float = 0.1, **kwargs):
+    def __init__(self, *args, shrinkage: float = 0.1, large_n_threshold: int = 100, **kwargs):
         super().__init__(*args, **kwargs)
         self.shrinkage = shrinkage
+        self.large_n_threshold = large_n_threshold
 
     def _compute_distance_matrix(self, returns_window: pd.DataFrame) -> pd.DataFrame:
         tickers = returns_window.columns.tolist()
         dist = _partial_corr_distance(
             returns_window.values.astype(float),
             shrinkage=self.shrinkage,
+            large_n_threshold=self.large_n_threshold,
         )
         return pd.DataFrame(dist, index=tickers, columns=tickers)
 

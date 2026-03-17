@@ -193,6 +193,35 @@ def extract_model_params(model: Any) -> Dict[str, Any]:
             if hasattr(model.res_, "loglikelihood"):
                 info["loglikelihood"] = float(model.res_.loglikelihood)
 
+    # ── DCC-GARCH (forecasting + classification wrapper) ──────────────
+    elif class_name in ("DCCGARCHWeeklyRV", "DCCGARCHSpikeClassifier"):
+        m = model
+        if class_name == "DCCGARCHSpikeClassifier" and getattr(model, "dcc_", None) is not None:
+            m = model.dcc_
+
+        info["p"] = getattr(m, "p", None)
+        info["q"] = getattr(m, "q", None)
+        info["horizon"] = getattr(m, "horizon", None)
+        info["scale"] = getattr(m, "scale", None)
+        info["rho_weight"] = getattr(m, "rho_weight", None)
+        info["aux_returns_col"] = getattr(m, "aux_returns_col", None)
+
+        if getattr(m, "_dcc_ab", None) is not None:
+            info["dcc_alpha"] = float(m._dcc_ab[0])
+            info["dcc_beta"] = float(m._dcc_ab[1])
+
+        if getattr(m, "res1_", None) is not None:
+            info["garch1_params"] = {
+                str(k): float(v) for k, v in m.res1_.params.items()
+            }
+        if getattr(m, "res2_", None) is not None:
+            info["garch2_params"] = {
+                str(k): float(v) for k, v in m.res2_.params.items()
+            }
+
+        if class_name == "DCCGARCHSpikeClassifier" and getattr(model, "calibrator_", None) is not None:
+            info["calibrator_params"] = _extract_pipeline_params(model.calibrator_)
+
     # ── Regime-Switching HAR (regression) ──────────────────────────────
     elif class_name == "RegimeSwitchingHARLogRegressor":
         info["regime_col"] = model.regime_col
@@ -249,7 +278,28 @@ def extract_model_params(model: Any) -> Dict[str, Any]:
             info["stage1_params"] = _extract_pipeline_params(model._stage1)
         if hasattr(model, "_stage2") and model._stage2 is not None:
             info["stage2_params"] = _extract_pipeline_params(model._stage2)
+    # ── LearnedWeightNetworkHARRegressor ───────────────────────────
+    elif class_name == "LearnedWeightNetworkHARRegressor":
+        info["k"] = model.k
+        info["m"] = model.m
+        info["alpha"] = model.alpha
+        info["lasso_alpha"] = model.lasso_alpha
+        info["use_clustering"] = model.use_clustering
+        if model._W is not None:
+            info["W"] = model._W.tolist()
+        if hasattr(model, "_pipe") and model._pipe is not None:
+            info.update(_extract_pipeline_params(model._pipe))
 
+    # ── LearnedWeightNetworkHARClassifier ──────────────────────────
+    elif class_name == "LearnedWeightNetworkHARClassifier":
+        info["k"] = model.k
+        info["m"] = model.m
+        info["C"] = model.C
+        info["use_clustering"] = model.use_clustering
+        if model._W is not None:
+            info["W"] = model._W.tolist()
+        if hasattr(model, "_pipe") and model._pipe is not None:
+            info.update(_extract_pipeline_params(model._pipe))
     # ── Fallback: try common patterns ──────────────────────────────────
     else:
         if hasattr(model, "model_") and model.model_ is not None:
@@ -359,6 +409,54 @@ def serialize_graph_snapshots(net_obj: Any) -> Dict[str, Any]:
     return _to_serializable(result)
 
 
+def serialize_feature_snapshots(
+    data_dict: Dict[str, pd.DataFrame],
+    tickers: Optional[List[str]] = None,
+    prefix: str = "net_",
+) -> Dict[str, Any]:
+    """
+    Serialize per-ticker network feature time series to a JSON-friendly dict.
+
+    Parameters
+    ----------
+    data_dict : Dict[str, DataFrame]
+        Per-ticker feature DataFrames (typically output of fit_transform).
+    tickers : Optional[List[str]]
+        If provided, only serialize these tickers that exist in data_dict.
+    prefix : str
+        Column prefix used to select network features (default: "net_").
+    """
+    selected = tickers or sorted(data_dict.keys())
+    out: Dict[str, Any] = {
+        "n_tickers": 0,
+        "feature_prefix": prefix,
+        "tickers": {},
+    }
+
+    for t in selected:
+        if t not in data_dict:
+            continue
+        df = data_dict[t]
+        net_cols = [c for c in df.columns if c.startswith(prefix)]
+        if not net_cols:
+            continue
+
+        snap_df = df[net_cols].copy()
+        snap_df.index = pd.to_datetime(snap_df.index)
+        snap_df = snap_df.replace([np.inf, -np.inf], np.nan)
+        snap_df = snap_df.reset_index().rename(columns={"index": "Date"})
+        snap_df["Date"] = snap_df["Date"].dt.strftime("%Y-%m-%d")
+
+        out["tickers"][t] = {
+            "n_rows": int(len(snap_df)),
+            "columns": net_cols,
+            "rows": _to_serializable(snap_df.to_dict(orient="records")),
+        }
+
+    out["n_tickers"] = len(out["tickers"])
+    return _to_serializable(out)
+
+
 # ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
@@ -391,6 +489,40 @@ def save_model_params(
         json.dump(_to_serializable(params_store), f, indent=2, default=str)
 
     print(f"Model parameters    -> {out_path}  ({len(params_store)} records)")
+    return out_path
+
+
+def save_feature_snapshots(
+    data_dict: Dict[str, pd.DataFrame],
+    results_dir: Path,
+    name: str = "feature_snapshots",
+    tickers: Optional[List[str]] = None,
+    prefix: str = "net_",
+) -> Path:
+    """
+    Serialize and persist per-ticker feature snapshots for interpretability.
+
+    Parameters
+    ----------
+    data_dict  : Per-ticker feature DataFrames.
+    results_dir: Directory to write into (created if needed).
+    name       : Base filename (without extension).
+    tickers    : Optional subset of tickers to include.
+    prefix     : Column prefix used to filter feature columns.
+
+    Returns
+    -------
+    Path to the written JSON file.
+    """
+    out_dir = Path(results_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{name}.json"
+
+    data = serialize_feature_snapshots(data_dict, tickers=tickers, prefix=prefix)
+    with open(out_path, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+
+    print(f"Feature snapshots   -> {out_path}  ({data['n_tickers']} tickers)")
     return out_path
 
 

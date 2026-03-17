@@ -1,68 +1,145 @@
+import json
+import re
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.patches as mpatches
+import networkx as nx
 import pandas as pd
 import numpy as np
 
+
+# ---------------------------------------------------------------------------
+# Category classification helpers
+# ---------------------------------------------------------------------------
+
+_BASELINE_CATEGORIES = frozenset({"HAR", "ARIMA", "GARCH", "RegimeSwitching"})
+_NON_GARCH_BASELINES = frozenset({"HAR", "ARIMA", "RegimeSwitching"})
+
+
+def _strip_k(cat: str) -> str:
+    """Remove [k=N] suffix from a category string."""
+    return re.sub(r"\s*\[k=\d+\]$", "", cat)
+
+
+def _distance_group(cat: str) -> str:
+    """Map a category string to its distance-metric group."""
+    base = _strip_k(cat)
+    if base.startswith("PCorr"):
+        return "PCorr"
+    if base.startswith("MI ") or base == "MI":
+        return "MI"
+    return "Corr"
+
+
+def _is_network(cat: str) -> bool:
+    return _strip_k(cat) not in _BASELINE_CATEGORIES
+
+
+# ---------------------------------------------------------------------------
+# plot_ticker_predictions  (rewritten)
+# ---------------------------------------------------------------------------
 
 def plot_ticker_predictions(
     pred_store: dict,
     metrics_df: pd.DataFrame,
     sample_tickers: list,
     save_dir: "str | None" = None,
+    use_log: bool = True,
 ):
     """
-    For each ticker in sample_tickers, plot true Y_fwd against ONE model per
-    category -- the best model in that category by mean R2 across tickers.
+    For each ticker plot true Y_fwd against a small set of selected models:
 
-    This keeps the legend readable regardless of how many model variants exist:
-    only one curve per category (HAR, ARIMA, GARCH, Network [k=1], ...) is shown.
+    * **Best Corr network** — lowest per-ticker RMSE among all squared-
+      correlation network categories (Network, Clustering, SplitFeatures,
+      ExpKernel, LearnedWeight, …).
+    * **Best PCorr network** — same, among PCorr* categories.
+    * **Best MI network** — same, among MI* categories.
+    * **Best GARCH** — lowest per-ticker RMSE among GARCH models.
+    * **Best baseline** — lowest per-ticker RMSE among HAR / ARIMA /
+      RegimeSwitching (i.e. all non-GARCH baselines).
 
-    Network categories are an exception: ALL network-category models are plotted
-    since those are the proposed models and comparing them is the key analysis.
+    Selection is done **per ticker** so each stock gets its own best model
+    from each group.
 
     Parameters
     ----------
-    pred_store   : {ticker: DataFrame} with Y_true + one column per model name.
-    metrics_df   : output of run_benchmarks_multi_fold (has Category, Model, R2 cols).
-    sample_tickers: tickers to plot.
-    save_dir     : if given, saves each figure as <save_dir>/<ticker>_predictions.png.
+    pred_store     : ``{ticker: DataFrame}`` with ``Y_true`` + model columns.
+    metrics_df     : Fold-level metrics (has Category, Ticker, Model, RMSE, …).
+    sample_tickers : Tickers to plot.
+    save_dir       : If given, saves ``<save_dir>/<ticker>_predictions.png``.
+    use_log        : Use RMSE_log (True) or raw RMSE (False) for selection.
     """
-    # ── Pick best model per category (by pct_R2_pos across all tickers) ──
-    cat_best: dict = {}   # {category: [model_name]}
-    per_ticker_r2 = (
-        metrics_df.groupby(["Category", "Ticker", "Model"])["R2"]
+    # choose metric column based on selection (log vs raw)
+    if "RMSE" not in metrics_df.columns and "RMSE_log" not in metrics_df.columns:
+        raise ValueError("metrics_df must contain 'RMSE' or 'RMSE_log' column")
+    rmse_col = "RMSE_log" if use_log and "RMSE_log" in metrics_df.columns else "RMSE"
+
+    # Average RMSE per (Category, Ticker, Model)
+    per_ticker = (
+        metrics_df
+        .groupby(["Category", "Ticker", "Model"])[rmse_col]
         .mean()
         .reset_index()
     )
-    pct_pos = (
-        per_ticker_r2.groupby(["Category", "Model"])
-        .agg(pct_R2_pos=("R2", lambda x: float((x > 0).mean())))
-        .reset_index()
+
+    # Assign each category to a plotting group
+    per_ticker["_group"] = per_ticker["Category"].apply(
+        lambda c: (
+            "GARCH" if _strip_k(c) == "GARCH"
+            else ("Baseline" if _strip_k(c) in _NON_GARCH_BASELINES
+                  else _distance_group(c))
+        )
     )
-    for cat, grp in pct_pos.groupby("Category"):
-        best_model = grp.loc[grp["pct_R2_pos"].idxmax(), "Model"]
-        cat_best[cat] = [best_model]
+
+    # Fixed colour scheme
+    group_style = {
+        "Corr":     {"color": "#1f77b4", "label": "Best Corr Network"},
+        "PCorr":    {"color": "#ff7f0e", "label": "Best PCorr Network"},
+        "MI":       {"color": "#2ca02c", "label": "Best MI Network"},
+        "GARCH":    {"color": "#d62728", "label": "Best GARCH"},
+        "Baseline": {"color": "#9467bd", "label": "Best Baseline (non-GARCH)"},
+    }
 
     for ticker in sample_tickers:
         if ticker not in pred_store:
             continue
 
         df = pred_store[ticker]
-        model_cols = [c for c in df.columns if c != "Y_true"]
-        df = df.dropna(subset=model_cols, how="all")
+        if "Y_true" not in df.columns:
+            continue
 
-        # Collect the columns to plot: best-per-category for baselines,
-        # all models for network categories.
-        cols_to_plot = []
-        for cat, model_names in sorted(cat_best.items()):
-            for mn in model_names:
-                col_key = f"[{cat}] {mn}"
-                if col_key in df.columns:
-                    cols_to_plot.append((cat, mn, col_key))
+        ticker_metrics = per_ticker[per_ticker["Ticker"] == ticker]
+        if ticker_metrics.empty:
+            continue
 
-        n_curves = len(cols_to_plot)
-        fig_h = max(5, 3 + n_curves * 0.35)
-        fig, ax = plt.subplots(figsize=(14, fig_h))
+        # Pick best model per group for this ticker (lowest RMSE)
+        curves = []   # (group_key, col_key, label)
+        for grp_key, style in group_style.items():
+            grp = ticker_metrics[ticker_metrics["_group"] == grp_key]
+            if grp.empty:
+                continue
+            best_idx = grp[rmse_col].idxmin()
+            best_cat   = grp.loc[best_idx, "Category"]
+            best_model = grp.loc[best_idx, "Model"]
+            best_rmse  = grp.loc[best_idx, rmse_col]
+            col_key = f"[{best_cat}] {best_model}"
+            if col_key in df.columns:
+                display_model = best_model.replace(" (no outliers)", "")
+                sel_tag = "log" if use_log else "raw"
+                label = f"{style['label']} ({sel_tag}): {display_model}  ({rmse_col}={best_rmse:.4f})"
+                curves.append((grp_key, col_key, label))
+
+        if not curves:
+            continue
+
+        # Restrict to 2025 test period
+        df = df[df.index.year == 2025]
+        if df.empty:
+            continue
+
+        fig, ax = plt.subplots(figsize=(14, 8))
 
         ax.plot(
             df.index, df["Y_true"],
@@ -73,32 +150,27 @@ def plot_ticker_predictions(
             zorder=5,
         )
 
-        colours = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-        for i, (cat, model_name, col_key) in enumerate(cols_to_plot):
-            label = f"[{cat}] {model_name}"
+        for grp_key, col_key, label in curves:
+            style = group_style[grp_key]
             ax.plot(
                 df.index,
                 df[col_key],
                 label=label,
                 linewidth=1.0,
                 alpha=0.80,
-                color=colours[i % len(colours)],
+                color=style["color"],
             )
 
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
         ax.xaxis.set_major_locator(mdates.YearLocator())
-        ax.set_title(ticker, fontsize=14, fontweight="bold")
+        ax.set_title(f"{ticker} — Model Predictions", fontsize=14, fontweight="bold")
         ax.set_xlabel("Date")
         ax.set_ylabel("Realized Variance (Y_fwd)")
-        ax.legend(
-            loc="upper left",
-            fontsize=8,
-            ncol=2,
-            framealpha=0.7,
-        )
+        ax.legend(loc="upper left", fontsize=7.5, framealpha=0.7)
         fig.tight_layout()
 
         if save_dir is not None:
+            Path(save_dir).mkdir(parents=True, exist_ok=True)
             fig.savefig(f"{save_dir}/{ticker}_predictions.png", dpi=150, bbox_inches="tight")
 
         plt.show()
@@ -210,7 +282,7 @@ def plot_network_degrees(
     if not available:
         available = deg_df.columns[deg_df.notna().any()].tolist()[:5]
 
-    fig, ax = plt.subplots(figsize=(14, 6))
+    fig, ax = plt.subplots(figsize=(14, 8))
 
     mean_deg = deg_df.mean(axis=1)
     ax.fill_between(
@@ -265,3 +337,278 @@ def plot_network_degrees(
 
     plt.show()
     plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Graph neighbourhood comparison  (first vs last snapshot)
+# ---------------------------------------------------------------------------
+
+def _load_graph_json(path: "str | Path") -> dict:
+    """Load a saved graph-snapshot JSON file."""
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def _snapshot_to_nx(snap: dict) -> nx.Graph:
+    """Reconstruct a NetworkX graph from a serialised snapshot dict."""
+    G = nx.Graph()
+    G.add_nodes_from(snap["nodes"])
+    for e in snap["edges"]:
+        G.add_edge(e["source"], e["target"], weight=e["weight"])
+    return G
+
+
+def _ego_subgraph(G: nx.Graph, center: str, k: int = 5) -> nx.Graph:
+    """Extract the k-nearest-neighbour ego graph around *center*.
+
+    Keeps only the *k* closest neighbours (by edge weight = distance)
+    plus the center node.  Edges among neighbours are included if
+    they exist in *G*.
+    """
+    if center not in G:
+        return nx.Graph()
+    neighbours = list(G.neighbors(center))
+    nb_dist = [(nb, G[center][nb]["weight"]) for nb in neighbours]
+    nb_dist.sort(key=lambda x: x[1])
+    top_k = [nb for nb, _ in nb_dist[:k]]
+    nodes = [center] + top_k
+    return G.subgraph(nodes).copy()
+
+
+def plot_neighbourhood_change(
+    graph_json_path: "str | Path",
+    focus_tickers: "list[str] | None" = None,
+    k: int = 5,
+    save_path: "str | None" = None,
+):
+    """
+    Side-by-side ego-network plots comparing the first and last graph
+    snapshot for each focus ticker.
+
+    For each focus ticker two subplots are drawn:
+    * **Left**  — ego graph at the earliest snapshot.
+    * **Right** — ego graph at the latest snapshot.
+
+    Nodes that are neighbours in **both** snapshots are coloured blue;
+    nodes present only in the early snapshot are orange; nodes only in the
+    late snapshot are green.  Edge thickness is proportional to similarity
+    (1 − distance).
+
+    Parameters
+    ----------
+    graph_json_path : Path to a saved graph JSON (e.g. ``results/graphs/sqcorr_k5.json``).
+    focus_tickers   : Tickers to plot.  Defaults to ``AAPL, NVDA, TSLA, MSFT``.
+    k               : Number of nearest neighbours to show per ego graph.
+    save_path       : If given, saves the figure.
+    """
+    if focus_tickers is None:
+        focus_tickers = ["AAPL", "NVDA", "TSLA", "MSFT"]
+
+    data = _load_graph_json(graph_json_path)
+    snaps = data["snapshots"]
+    if len(snaps) < 2:
+        print("[plot_neighbourhood_change] Need at least 2 snapshots.")
+        return
+
+    first_snap = snaps[0]
+    last_snap  = snaps[-1]
+    G_first = _snapshot_to_nx(first_snap)
+    G_last  = _snapshot_to_nx(last_snap)
+
+    first_date = first_snap["date"][:10]
+    last_date  = last_snap["date"][:10]
+
+    # Filter to tickers actually present in both graphs
+    focus_tickers = [t for t in focus_tickers if t in G_first and t in G_last]
+    if not focus_tickers:
+        print("[plot_neighbourhood_change] No focus tickers found in both snapshots.")
+        return
+
+    net_class = data.get("network_class", "Network")
+    k_val     = data.get("hyperparams", {}).get("k", k)
+    title_suffix = f"{net_class}, k={k_val}"
+
+    n_tickers = len(focus_tickers)
+    fig, axes = plt.subplots(
+        n_tickers, 2,
+        figsize=(16, 5 * n_tickers),
+        squeeze=False,
+    )
+
+    for row, ticker in enumerate(focus_tickers):
+        ego_first = _ego_subgraph(G_first, ticker, k)
+        ego_last  = _ego_subgraph(G_last,  ticker, k)
+
+        nb_first = set(ego_first.nodes()) - {ticker}
+        nb_last  = set(ego_last.nodes())  - {ticker}
+        stable   = nb_first & nb_last
+        lost     = nb_first - nb_last
+        gained   = nb_last  - nb_first
+
+        for col, (ego, snap_date, snap_label) in enumerate([
+            (ego_first, first_date, "First"),
+            (ego_last,  last_date,  "Last"),
+        ]):
+            ax = axes[row][col]
+            if ego.number_of_nodes() == 0:
+                ax.set_title(f"{ticker} — {snap_label} ({snap_date})\n(not in graph)")
+                ax.axis("off")
+                continue
+
+            # Node colours
+            node_colors = []
+            for n in ego.nodes():
+                if n == ticker:
+                    node_colors.append("#e74c3c")   # red: focus
+                elif n in stable:
+                    node_colors.append("#3498db")    # blue: in both
+                elif n in lost:
+                    node_colors.append("#e67e22")    # orange: only in first
+                else:
+                    node_colors.append("#2ecc71")    # green: only in last
+            # Edge widths (thicker = closer = lower distance)
+            edge_widths = []
+            for u, v, d in ego.edges(data=True):
+                w = d.get("weight", 0.5)
+                edge_widths.append(max(0.5, 4.0 * (1.0 - w)))
+
+            pos = nx.spring_layout(ego, seed=42, k=2.0)
+            nx.draw_networkx_nodes(
+                ego, pos, ax=ax,
+                node_color=node_colors,
+                node_size=600,
+                edgecolors="black",
+                linewidths=0.8,
+            )
+            nx.draw_networkx_labels(ego, pos, ax=ax, font_size=7, font_weight="bold")
+            nx.draw_networkx_edges(
+                ego, pos, ax=ax,
+                width=edge_widths,
+                alpha=0.6,
+                edge_color="grey",
+            )
+            # Edge labels: distance
+            edge_labels = {
+                (u, v): f"{d.get('weight', 0):.2f}"
+                for u, v, d in ego.edges(data=True)
+            }
+            nx.draw_networkx_edge_labels(ego, pos, edge_labels, ax=ax, font_size=6)
+
+            ax.set_title(
+                f"{ticker} — {snap_label} Snapshot ({snap_date})",
+                fontsize=11, fontweight="bold",
+            )
+            ax.axis("off")
+
+    # Build legend
+    legend_patches = [
+        mpatches.Patch(color="#e74c3c", label="Focus ticker"),
+        mpatches.Patch(color="#3498db", label="Neighbour (both snapshots)"),
+        mpatches.Patch(color="#e67e22", label="Neighbour (first only)"),
+        mpatches.Patch(color="#2ecc71", label="Neighbour (last only)"),
+    ]
+    fig.legend(
+        handles=legend_patches,
+        loc="lower center",
+        ncol=4,
+        fontsize=9,
+        framealpha=0.8,
+    )
+    fig.suptitle(
+        f"Neighbourhood Evolution: First vs Last Snapshot  [{title_suffix}]",
+        fontsize=14, fontweight="bold", y=1.01,
+    )
+    fig.tight_layout(rect=[0, 0.04, 1, 1])
+
+    if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    plt.show()
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import sys
+
+    repo_root   = Path(__file__).parent.parent
+    results_dir = repo_root / "results"
+    plots_dir   = results_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Load fold-level metrics ──────────────────────────────────────────────
+    bench_path = results_dir / "results_bench.json"
+    if not bench_path.exists():
+        print(f"ERROR: {bench_path} not found. Run evaluation/cross_val.py first.")
+        sys.exit(1)
+
+    metrics_df = pd.read_json(bench_path, orient="records")
+    for _col in ("R2", "R2_log"):
+        if _col in metrics_df.columns:
+            metrics_df = metrics_df[metrics_df[_col] >= -1e6]
+
+    # ── Load prediction store from saved CSVs ───────────────────────────────
+    pred_dir = results_dir / "predictions_regression"
+    pred_store: dict = {}
+    if pred_dir.exists():
+        for csv_path in sorted(pred_dir.glob("*_predictions.csv")):
+            ticker = csv_path.stem.replace("_predictions", "")
+            pred_store[ticker] = pd.read_csv(
+                csv_path, index_col="Date", parse_dates=True
+            )
+    else:
+        print(f"WARNING: {pred_dir} not found — skipping prediction plots.")
+
+    sample_tickers = sorted(pred_store.keys())
+
+    # ── 1. Per-ticker prediction plots ──────────────────────────────────────
+    if pred_store:
+        print(f"\nPlotting predictions for: {sample_tickers}")
+        # Save raw-selection plots
+        raw_dir = plots_dir / "predictions_raw"
+        print(f"Writing raw-selection plots to {raw_dir}")
+        plot_ticker_predictions(
+            pred_store,
+            metrics_df,
+            sample_tickers,
+            save_dir=str(raw_dir),
+            use_log=False,
+        )
+
+        # Save log-selection plots
+        log_dir = plots_dir / "predictions_log"
+        print(f"Writing log-selection plots to {log_dir}")
+        plot_ticker_predictions(
+            pred_store,
+            metrics_df,
+            sample_tickers,
+            save_dir=str(log_dir),
+            use_log=True,
+        )
+
+    # ── 2. Graph neighbourhood change plots ─────────────────────────────────
+    focus      = ["AAPL", "TSLA", "GOOG", "META", "MSFT", "NVDA", "NFLX", "AMZN"]
+    graphs_dir = results_dir / "graphs"
+
+    for fname, tag in [
+        ("sqcorr_k5.json", "sqcorr"),
+        ("pcorr_k5.json",  "pcorr"),
+        ("mi_k5.json",     "mi"),
+    ]:
+        gpath = graphs_dir / fname
+        if not gpath.exists():
+            print(f"WARNING: {gpath} not found — skipping {tag} neighbourhood plot.")
+            continue
+        print(f"\nPlotting neighbourhood change for {tag} (k=5) ...")
+        plot_neighbourhood_change(
+            graph_json_path=gpath,
+            focus_tickers=focus,
+            k=5,
+            save_path=str(plots_dir / f"neighbourhood_change_{tag}_k5.png"),
+        )
+
+    print(f"\nAll plots saved to {plots_dir}")

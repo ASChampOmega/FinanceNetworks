@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import List, Optional
 import numpy as np
 import pandas as pd
@@ -65,7 +66,10 @@ class HARLogRegressor(BaseEstimator, RegressorMixin):
     def __init__(self, ridge_alpha: float = 0.0, lasso_alpha: float = 0.0):
         self.ridge_alpha = ridge_alpha
         self.lasso_alpha = lasso_alpha
-        self.features = ["log_RV1", "log_RV5", "log_RV22"]
+        self.features = [
+            "log_RV1", "log_RV5", "log_RV22",
+            "Market_Returns", "log_Market_RV5", "log_Market_RV22",
+        ]
         self.model_: Optional[Pipeline] = None
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "HARLogRegressor":
@@ -107,6 +111,9 @@ class HARExtendedLogRegressor(BaseEstimator, RegressorMixin):
             "log_RV22",
             "log_neg_semi5",
             "log_pos_semi5",
+            "Market_Returns",
+            "log_Market_RV5",
+            "log_Market_RV22",
         ]
         self.model_: Optional[Pipeline] = None
 
@@ -307,6 +314,418 @@ class GARCHWeeklyRV:
 
 
 # ---------------------------------------------------------------------------
+# DCC-GARCH weekly RV forecast
+# ---------------------------------------------------------------------------
+
+class DCCGARCHWeeklyRV:
+    """
+    Bivariate DCC-GARCH baseline for weekly RV forecasting.
+
+    Forecast output
+    ---------------
+    Returns a horizon-day sum of spillover-adjusted variance:
+
+        RV_hat = sum_k sigma1_k^2 * exp(rho_weight * rho_k^2
+                   * [log(sigma2_k^2/sigma2_unc^2)
+                      - log(sigma1_k^2/sigma1_unc^2)])
+
+    The bracket is the *residual* market volatility surprise: the market's
+    proportional deviation from its long-run level minus the asset's own
+    deviation.  When both spike together the residual is near zero and the
+    forecast equals plain GARCH.  Only when market vol moves *more* (or
+    less) than what the asset GARCH has already absorbed does the DCC
+    channel add a correction.
+    """
+
+    def __init__(
+        self,
+        p: int = 1,
+        q: int = 1,
+        dist: str = "normal",
+        mean: str = "zero",
+        scale: float = 1.0,
+        horizon: int = 5,
+        aux_returns_col: Optional[str] = "Market_Returns",
+        rho_weight: float = 0.10,
+        dcc_start: tuple[float, float] = (0.03, 0.95),
+    ):
+        self.p = int(p)
+        self.q = int(q)
+        self.dist = dist
+        self.mean = mean
+        self.scale = float(scale)
+        self.horizon = int(horizon)
+        self.aux_returns_col = aux_returns_col
+        self.rho_weight = float(rho_weight)
+        self.dcc_start = tuple(map(float, dcc_start))
+
+        self.features = ["log_RV1", "log_RV5", "log_RV22", "Returns"]
+        if aux_returns_col is not None:
+            self.features.append(aux_returns_col)
+
+        self.res1_ = None
+        self.res2_ = None
+        self._params1 = None
+        self._params2 = None
+        self._train_r1 = None
+        self._train_r2 = None
+        self._qbar = None
+        self._q_last = None
+        self._dcc_ab = None
+        self._rho_unc = None
+        self._var1_unc = None
+        self._var2_unc = None
+        self._last_train_return = None
+
+    @staticmethod
+    def _ensure_symmetric(a: np.ndarray) -> np.ndarray:
+        return 0.5 * (a + a.T)
+
+    @staticmethod
+    def _regularize_pd(a: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+        a = 0.5 * (a + a.T)
+        return a + eps * np.eye(a.shape[0])
+
+    def _check_is_fitted(self) -> None:
+        if self._params1 is None or self._params2 is None or self._q_last is None:
+            raise RuntimeError("Call fit() before predict().")
+
+    def _aux_series(
+        self,
+        X: pd.DataFrame,
+        *,
+        previous_return: Optional[float] = None,
+    ) -> pd.Series:
+        """
+        Auxiliary return series.
+
+        If aux_returns_col exists, use it directly.
+        Otherwise use lagged Returns, but preserve continuity across
+        train/test by injecting the last training return into the first
+        test observation.
+        """
+        if self.aux_returns_col is not None and self.aux_returns_col in X.columns:
+            return X[self.aux_returns_col].astype(float)
+
+        r = X["Returns"].astype(float).shift(1)
+        if previous_return is not None and len(r) > 0:
+            r = r.copy()
+            r.iloc[0] = previous_return
+        return r
+
+    def _clean_pair(
+        self,
+        r1: pd.Series,
+        r2: pd.Series,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        d = pd.DataFrame({"r1": r1, "r2": r2}).dropna()
+        return (
+            d["r1"].to_numpy(dtype=float) * self.scale,
+            d["r2"].to_numpy(dtype=float) * self.scale,
+        )
+
+    def _fit_dcc(
+        self,
+        z: np.ndarray,
+    ) -> tuple[float, float, np.ndarray, np.ndarray]:
+        from scipy.optimize import minimize
+
+        z = np.asarray(z, dtype=float)
+        if z.ndim != 2 or z.shape[1] != 2:
+            raise ValueError("z must be an (n, 2) array of standardized residuals.")
+        if len(z) < 2:
+            raise ValueError("Need at least 2 observations to fit DCC.")
+
+        qbar = np.cov(z.T)
+        qbar = self._regularize_pd(np.asarray(qbar, dtype=float))
+
+        def _negloglike(ab: np.ndarray) -> float:
+            a, b = float(ab[0]), float(ab[1])
+
+            if a < 0.0 or b < 0.0 or (a + b) >= 0.999:
+                return 1e12
+
+            q_t = qbar.copy()
+            nll = 0.0
+
+            for t in range(1, len(z)):
+                z_prev = z[t - 1][:, None]
+                q_t = (1.0 - a - b) * qbar + a * (z_prev @ z_prev.T) + b * q_t
+                q_t = self._regularize_pd(q_t)
+
+                d = np.sqrt(np.clip(np.diag(q_t), 1e-12, None))
+                r_t = q_t / np.outer(d, d)
+                r_t = self._regularize_pd(r_t)
+
+                sign, logdet_r = np.linalg.slogdet(r_t)
+                if sign <= 0.0 or not np.isfinite(logdet_r):
+                    return 1e12
+
+                z_t = z[t]
+                try:
+                    inv_r_z = np.linalg.solve(r_t, z_t)
+                except np.linalg.LinAlgError:
+                    return 1e12
+
+                quad = float(z_t @ inv_r_z)
+                norm2 = float(z_t @ z_t)
+                nll += 0.5 * (logdet_r + quad - norm2)
+
+            return float(nll)
+
+        bounds = [(1e-6, 0.999), (1e-6, 0.999)]
+        constraints = (
+            {"type": "ineq", "fun": lambda ab: 0.999 - ab[0] - ab[1]},
+        )
+
+        x0 = np.asarray(self.dcc_start, dtype=float)
+        opt = minimize(
+            _negloglike,
+            x0=x0,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+        )
+
+        if opt.success:
+            a_hat, b_hat = map(float, opt.x)
+        else:
+            a_hat, b_hat = 0.03, 0.95
+
+        q_t = qbar.copy()
+        for t in range(1, len(z)):
+            z_prev = z[t - 1][:, None]
+            q_t = (1.0 - a_hat - b_hat) * qbar + a_hat * (z_prev @ z_prev.T) + b_hat * q_t
+            q_t = self._regularize_pd(q_t)
+
+        return a_hat, b_hat, qbar, q_t
+
+    def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None):
+        try:
+            from arch import arch_model
+        except ImportError as e:
+            raise ImportError("arch package not available. Install via: pip install arch") from e
+
+        if "Returns" not in X.columns:
+            raise KeyError("X must contain a 'Returns' column.")
+
+        r1 = X["Returns"].astype(float)
+        r2 = self._aux_series(X)
+
+        r1_arr, r2_arr = self._clean_pair(r1, r2)
+
+        min_obs = max(100, 10 * (self.p + self.q))
+        if len(r1_arr) < min_obs:
+            raise ValueError(
+                f"Not enough observations to fit DCC-GARCH baseline. "
+                f"Need at least {min_obs}, got {len(r1_arr)}."
+            )
+
+        am1 = arch_model(
+            r1_arr,
+            mean=self.mean,
+            vol="GARCH",
+            p=self.p,
+            q=self.q,
+            dist=self.dist,
+        )
+        am2 = arch_model(
+            r2_arr,
+            mean=self.mean,
+            vol="GARCH",
+            p=self.p,
+            q=self.q,
+            dist=self.dist,
+        )
+
+        self.res1_ = am1.fit(disp="off")
+        self.res2_ = am2.fit(disp="off")
+
+        self._params1 = self.res1_.params.copy()
+        self._params2 = self.res2_.params.copy()
+        self._train_r1 = r1_arr.copy()
+        self._train_r2 = r2_arr.copy()
+        self._last_train_return = float(r1.iloc[-1])
+
+        z = np.column_stack(
+            [
+                np.asarray(self.res1_.std_resid, dtype=float),
+                np.asarray(self.res2_.std_resid, dtype=float),
+            ]
+        )
+        z = z[np.isfinite(z).all(axis=1)]
+
+        if len(z) < 20:
+            raise ValueError("Insufficient finite standardized residuals for DCC fit.")
+
+        a_hat, b_hat, qbar, q_last = self._fit_dcc(z)
+        self._dcc_ab = (a_hat, b_hat)
+        self._qbar = qbar
+        self._q_last = q_last
+
+        # Unconditional correlation from Qbar
+        d_unc = np.sqrt(np.clip(np.diag(qbar), 1e-12, None))
+        self._rho_unc = float(qbar[0, 1] / (d_unc[0] * d_unc[1]))
+
+        # Unconditional variances from fitted GARCH parameters
+        def _uncond_var(params):
+            omega = float(params['omega'])
+            a_sum = sum(float(params[k]) for k in params.index if k.startswith('alpha'))
+            b_sum = sum(float(params[k]) for k in params.index if k.startswith('beta'))
+            denom = 1.0 - a_sum - b_sum
+            if denom <= 1e-6:
+                return omega / 1e-6
+            return omega / denom
+
+        self._var1_unc = _uncond_var(self._params1)
+        self._var2_unc = _uncond_var(self._params2)
+
+        return self
+
+    def _sigma_forecasts(
+        self,
+        all_r: np.ndarray,
+        params,
+        n_train: int,
+        n_pred: int,
+    ) -> np.ndarray:
+        from arch import arch_model
+
+        fixed = arch_model(
+            all_r,
+            mean=self.mean,
+            vol="GARCH",
+            p=self.p,
+            q=self.q,
+            dist=self.dist,
+        ).fix(params)
+
+        fcst = fixed.forecast(
+            horizon=self.horizon,
+            method="analytic",
+            start=n_train,   # first forecast uses all training obs
+            reindex=False,
+        )
+
+        m = np.asarray(fcst.variance.values, dtype=float)
+        if m.shape[0] < n_pred:
+            raise RuntimeError(
+                f"Expected at least {n_pred} variance rows, got {m.shape[0]}."
+            )
+
+        return m[-n_pred:]
+
+    def _dcc_update(self, q_prev: np.ndarray, z_prev: np.ndarray) -> np.ndarray:
+        a_hat, b_hat = self._dcc_ab
+        z_prev = np.asarray(z_prev, dtype=float)[:, None]
+        q_next = (1.0 - a_hat - b_hat) * self._qbar + a_hat * (z_prev @ z_prev.T) + b_hat * q_prev
+        return self._regularize_pd(q_next)
+
+    def _future_rho_steps(self, q_state: np.ndarray) -> List[float]:
+        """Return per-step signed correlations for the next *horizon* days."""
+        a_hat, b_hat = self._dcc_ab
+        q_t = q_state.copy()
+        rhos: List[float] = []
+
+        for _ in range(self.horizon):
+            d = np.sqrt(np.clip(np.diag(q_t), 1e-12, None))
+            rho = float(q_t[0, 1] / (d[0] * d[1]))
+            rhos.append(float(np.clip(rho, -0.999, 0.999)))
+
+            # Mean-forward DCC projection: E[z*z'] ≈ R_t
+            r_t = q_t / np.outer(d, d)
+            q_t = (1.0 - a_hat - b_hat) * self._qbar + a_hat * r_t + b_hat * q_t
+            q_t = self._regularize_pd(q_t)
+
+        return rhos
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        try:
+            from arch import arch_model
+        except ImportError as e:
+            raise ImportError("arch package not available. Install via: pip install arch") from e
+
+        self._check_is_fitted()
+
+        if "Returns" not in X.columns:
+            raise KeyError("X must contain a 'Returns' column.")
+
+        r1_test = X["Returns"].astype(float).fillna(0.0).to_numpy(dtype=float) * self.scale
+        r2_test = (
+            self._aux_series(X, previous_return=self._last_train_return)
+            .astype(float)
+            .fillna(0.0)
+            .to_numpy(dtype=float)
+            * self.scale
+        )
+
+        n_pred = len(r1_test)
+        if n_pred == 0:
+            return np.empty(0, dtype=float)
+
+        all_r1 = np.concatenate([self._train_r1, r1_test])
+        all_r2 = np.concatenate([self._train_r2, r2_test])
+        n_train = len(self._train_r1)
+
+        var1 = self._sigma_forecasts(all_r1, self._params1, n_train, n_pred)
+        var2 = self._sigma_forecasts(all_r2, self._params2, n_train, n_pred)
+
+        fixed1 = arch_model(
+            all_r1,
+            mean=self.mean,
+            vol="GARCH",
+            p=self.p,
+            q=self.q,
+            dist=self.dist,
+        ).fix(self._params1)
+
+        fixed2 = arch_model(
+            all_r2,
+            mean=self.mean,
+            vol="GARCH",
+            p=self.p,
+            q=self.q,
+            dist=self.dist,
+        ).fix(self._params2)
+
+        # Only use test-period standardized residuals to roll DCC forward
+        z1_test = np.nan_to_num(
+            np.asarray(fixed1.std_resid, dtype=float)[n_train:],
+            nan=0.0,
+        )
+        z2_test = np.nan_to_num(
+            np.asarray(fixed2.std_resid, dtype=float)[n_train:],
+            nan=0.0,
+        )
+
+        preds = np.empty(n_pred, dtype=float)
+        q_curr = self._q_last.copy()
+        log_var1_unc = np.log(max(self._var1_unc, 1e-20))
+        log_var2_unc = np.log(max(self._var2_unc, 1e-20))
+
+        for i in range(n_pred):
+            rhos = self._future_rho_steps(q_curr)
+            total = 0.0
+            for k in range(self.horizon):
+                s1 = var1[i, k]
+                s2 = var2[i, k]
+                rho_k = rhos[k]
+                # Residual market surprise: how much the market deviates from
+                # its long-run level *beyond* what the asset already reflects.
+                asset_dev = np.log(max(s1, 1e-20)) - log_var1_unc
+                mkt_dev = np.log(max(s2, 1e-20)) - log_var2_unc
+                residual = np.clip(mkt_dev - asset_dev, -1.0, 1.0)
+                total += s1 * np.exp(
+                    self.rho_weight * rho_k ** 2 * residual
+                )
+            preds[i] = total / (self.scale ** 2)
+
+            z_obs = np.array([z1_test[i], z2_test[i]], dtype=float)
+            q_curr = self._dcc_update(q_curr, z_obs)
+
+        return preds
+
+# ---------------------------------------------------------------------------
 # Regime-Switching HAR (threshold-based, 2 regimes)
 # ---------------------------------------------------------------------------
 
@@ -357,7 +776,10 @@ class RegimeSwitchingHARLogRegressor(BaseEstimator, RegressorMixin):
         self.regime_col = regime_col
         self.regime_percentile = regime_percentile
         self.min_regime_obs = min_regime_obs
-        self.features = ["log_RV1", "log_RV5", "log_RV22"]
+        self.features = [
+            "log_RV1", "log_RV5", "log_RV22",
+            "Market_Returns", "log_Market_RV5", "log_Market_RV22",
+        ]
         self.threshold_: float = 0.0
         self.models_: dict = {}
         self.fallback_model_: Optional[Pipeline] = None

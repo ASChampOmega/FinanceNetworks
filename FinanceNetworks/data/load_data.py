@@ -1,5 +1,6 @@
 ﻿from pathlib import Path
 
+import numpy as np
 import yfinance as yf
 import os
 import pandas as pd
@@ -53,5 +54,31 @@ def get_data(num_tickers: int = 10):
         data[ticker] = df
     return data
 
+def get_market_correlation():
+    if check_exists_data("SPY"):
+        print(f"Data for SPY already exists. Skipping download.")
+        return
+    df = download_data("SPY")
+    save_df(df, "SPY")
+
+
+def get_spy_returns() -> pd.Series:
+    """Load SPY data and return a daily log-returns Series indexed by Date."""
+    path = data_dir / "SPY_data.csv"
+    if not path.exists():
+        get_market_correlation()
+    df = pd.read_csv(path, index_col=0)
+    df = df.copy()
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date").set_index("Date")
+    else:
+        df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
+    returns = 100 * np.log(df["Adj Close"] / df["Adj Close"].shift(1))
+    returns.name = "Market_Returns"
+    return returns.dropna()
+    
+
 if __name__ == "__main__":
-    download_data_all(100)
+    download_data_all(500)
