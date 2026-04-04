@@ -92,11 +92,18 @@ def main() -> None:
     RESULTS_DIR = Path(__file__).parent.parent / "results" / "index_results"
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     KNN_VALUES = [1, 3, 5]
+    INDEX_SPIKE_QUANTILE = 0.75
+    INDEX_SPIKE_LOOKBACK = 252 * 3
 
     print("Loading and preprocessing Oxford-Man index data...")
     data_dict = get_index_data_for_har()
     tickers = list(data_dict.keys())
     print(f"  {len(tickers)} indices loaded: {tickers}")
+    print(
+        "Index spike labelling uses the last "
+        f"{INDEX_SPIKE_LOOKBACK} training days at the "
+        f"{INDEX_SPIKE_QUANTILE:.0%} quantile."
+    )
 
     graph_n_jobs = max(1, min(8, (os.cpu_count() or 1) - 1))
     cv_n_jobs = max(1, min(24, (os.cpu_count() or 1) - 1))
@@ -191,8 +198,8 @@ def main() -> None:
             "RegHAR-Logit (p50, C=0.1)":     (RegimeSwitchingHARLogitClassifier(C=0.1, regime_percentile=0.5, use_market=False), False),
         },
         "DCC-GARCH-Logit": {
-            "DCC-GARCH-Logit (C=0.1)":       (DCCGARCHSpikeClassifier(C=0.1, aux_returns_col=None), False),
-            "DCC-GARCH-Logit (C=1.0)":       (DCCGARCHSpikeClassifier(C=1.0, aux_returns_col=None), False),
+            "DCC-GARCH-Logit (C=0.1)":       (DCCGARCHSpikeClassifier(C=0.1, aux_returns_col=None, returns_multiplier=100.0), False),
+            "DCC-GARCH-Logit (C=1.0)":       (DCCGARCHSpikeClassifier(C=1.0, aux_returns_col=None, returns_multiplier=100.0), False),
         },
     }
 
@@ -272,7 +279,10 @@ def main() -> None:
     print(f"\nRunning baseline classifiers on {len(tickers)} indices...")
     metrics_df, pred_store, all_params = classification_cv_multi(
         data_dict, baseline_catalogue, tickers,
-        n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+        n_splits=2,
+        sample_tickers=SAMPLE_TICKERS,
+        spike_quantile=INDEX_SPIKE_QUANTILE,
+        spike_lookback=INDEX_SPIKE_LOOKBACK,
         save_params=True, num_workers=cv_n_jobs,
     )
     all_extra_metrics: list = []
@@ -286,7 +296,10 @@ def main() -> None:
         dd_net = data_dicts_net[k_val]
         m_k, ps_k, params_k = classification_cv_multi(
             dd_net, net_cat, list(dd_net.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_k)
@@ -302,7 +315,10 @@ def main() -> None:
         dd_pc = data_dicts_pcorr[k_val]
         m_pk, ps_pk, params_pk = classification_cv_multi(
             dd_pc, pc_cat, list(dd_pc.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_pk)
@@ -318,7 +334,10 @@ def main() -> None:
         dd_exp = data_dicts_exp[k_val]
         m_ek, ps_ek, params_ek = classification_cv_multi(
             dd_exp, exp_cat, list(dd_exp.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_ek)
@@ -334,7 +353,10 @@ def main() -> None:
         dd_sq = data_dicts_net[k_val]
         m_cl, ps_cl, params_cl = classification_cv_multi(
             dd_sq, cl_cat, list(dd_sq.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_cl)
@@ -350,7 +372,10 @@ def main() -> None:
         dd_exp = data_dicts_exp[k_val]
         m_ec, ps_ec, params_ec = classification_cv_multi(
             dd_exp, ec_cat, list(dd_exp.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_ec)
@@ -366,7 +391,10 @@ def main() -> None:
         dd_mi = data_dicts_mi[k_val]
         m_mi, ps_mi, params_mi = classification_cv_multi(
             dd_mi, mi_cat, list(dd_mi.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_mi)
@@ -382,7 +410,10 @@ def main() -> None:
         dd_sq = data_dicts_net[k_val]
         m_sp, ps_sp, params_sp = classification_cv_multi(
             dd_sq, split_cat, list(dd_sq.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_sp)
@@ -398,7 +429,10 @@ def main() -> None:
         dd_exp = data_dicts_exp[k_val]
         m_sc, ps_sc, params_sc = classification_cv_multi(
             dd_exp, splitc_cat, list(dd_exp.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_sc)
@@ -416,7 +450,10 @@ def main() -> None:
         dd_sq = data_dicts_net[k_val]
         m_lw, ps_lw, params_lw = classification_cv_multi(
             dd_sq, lw_cat, list(dd_sq.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_lw)
@@ -434,7 +471,10 @@ def main() -> None:
         dd_pc = data_dicts_pcorr[k_val]
         m_lwp, ps_lwp, params_lwp = classification_cv_multi(
             dd_pc, lw_pc_cat, list(dd_pc.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_lwp)
@@ -452,7 +492,10 @@ def main() -> None:
         dd_sq = data_dicts_net[k_val]
         m_lwc, ps_lwc, params_lwc = classification_cv_multi(
             dd_sq, lwc_cat, list(dd_sq.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_lwc)
@@ -470,7 +513,10 @@ def main() -> None:
         dd_pc = data_dicts_pcorr[k_val]
         m_lwcp, ps_lwcp, params_lwcp = classification_cv_multi(
             dd_pc, lwc_pc_cat, list(dd_pc.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_lwcp)
@@ -486,7 +532,10 @@ def main() -> None:
         dd_pc = data_dicts_pcorr[k_val]
         m_ps, ps_ps, params_ps = classification_cv_multi(
             dd_pc, ps_cat, list(dd_pc.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_ps)
@@ -502,7 +551,10 @@ def main() -> None:
         dd_exp = data_dicts_exp[k_val]
         m_es, ps_es, params_es = classification_cv_multi(
             dd_exp, es_cat, list(dd_exp.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_es)
@@ -518,7 +570,10 @@ def main() -> None:
         dd_mi = data_dicts_mi[k_val]
         m_ms, ps_ms, params_ms = classification_cv_multi(
             dd_mi, ms_cat, list(dd_mi.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_ms)
@@ -536,7 +591,10 @@ def main() -> None:
         dd_mi = data_dicts_mi[k_val]
         m_lwm, ps_lwm, params_lwm = classification_cv_multi(
             dd_mi, lw_mi_cat, list(dd_mi.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_lwm)
@@ -554,7 +612,10 @@ def main() -> None:
         dd_mi = data_dicts_mi[k_val]
         m_lwcm, ps_lwcm, params_lwcm = classification_cv_multi(
             dd_mi, lwc_mi_cat, list(dd_mi.keys()),
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2,
+            sample_tickers=SAMPLE_TICKERS,
+            spike_quantile=INDEX_SPIKE_QUANTILE,
+            spike_lookback=INDEX_SPIKE_LOOKBACK,
             save_params=True, num_workers=cv_n_jobs,
         )
         all_extra_metrics.append(m_lwcm)

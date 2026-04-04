@@ -191,6 +191,7 @@ def run_classification_cv(
     test_size: int = 252,
     min_train_size: int = 252 * 5,
     spike_quantile: float = 0.8,
+    spike_lookback: Optional[int] = None,
     sample_tickers: Optional[List[str]] = None,
     save_params: bool = False,
 ) -> "tuple[pd.DataFrame, dict, list] | tuple[pd.DataFrame, dict]":
@@ -217,6 +218,9 @@ def run_classification_cv(
     min_train_size  : Minimum training observations required.
     spike_quantile  : Quantile of training Y_fwd above which a day is a spike
                       (default 0.8 → top-20 %).
+    spike_lookback  : Optional recent-window length used when computing the
+                      training-fold spike threshold. When None, the full
+                      training fold is used.
     sample_tickers  : Store per-row predictions for these tickers.
 
     Returns
@@ -251,7 +255,7 @@ def run_classification_cv(
 
             # ── Spike labels (threshold from training fold only) ────────────
             threshold = compute_spike_threshold(
-                X_train["Y_fwd"], quantile=spike_quantile
+                X_train["Y_fwd"], quantile=spike_quantile, lookback=spike_lookback
             )
             y_train = add_spike_label(X_train, threshold)["spike"]
             y_test  = add_spike_label(X_test,  threshold)["spike"]
@@ -319,7 +323,7 @@ def run_classification_cv(
         if t in sample_set:
             # Attach ground-truth spike labels (global threshold for reference)
             global_thr = compute_spike_threshold(
-                feat["Y_fwd"], quantile=spike_quantile
+                feat["Y_fwd"], quantile=spike_quantile, lookback=spike_lookback
             )
             pred_df["Y_true_spike"] = (feat["Y_fwd"] > global_thr).astype(int)
             pred_store[t] = pred_df
@@ -341,7 +345,9 @@ def _run_single_clf_task(task: "dict[str, Any]") -> "dict[str, Any]":
 
     # Spike labels (threshold from training fold only)
     threshold = compute_spike_threshold(
-        X_train["Y_fwd"], quantile=task["spike_quantile"]
+        X_train["Y_fwd"],
+        quantile=task["spike_quantile"],
+        lookback=task["spike_lookback"],
     )
     y_train = add_spike_label(X_train, threshold)["spike"]
     y_test = add_spike_label(X_test, threshold)["spike"]
@@ -417,6 +423,7 @@ def classification_cv_multi(
     test_size: int = 252,
     min_train_size: int = 252 * 5,
     spike_quantile: float = 0.8,
+    spike_lookback: Optional[int] = None,
     sample_tickers: Optional[List[str]] = None,
     save_params: bool = False,
     num_workers: int = 24,
@@ -463,6 +470,7 @@ def classification_cv_multi(
                         "model_template": model_template,
                         "do_remove_outliers": do_remove_outliers,
                         "spike_quantile": spike_quantile,
+                        "spike_lookback": spike_lookback,
                         "store_predictions": ticker in sample_set,
                         "save_params": save_params,
                     })
@@ -510,7 +518,7 @@ def classification_cv_multi(
         if t in pred_store and t in data_dict:
             feat = data_dict[t]
             global_thr = compute_spike_threshold(
-                feat["Y_fwd"], quantile=spike_quantile
+                feat["Y_fwd"], quantile=spike_quantile, lookback=spike_lookback
             )
             pred_store[t]["Y_true_spike"] = (
                 feat["Y_fwd"] > global_thr

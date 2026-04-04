@@ -290,6 +290,7 @@ class DCCGARCHSpikeClassifier(BaseEstimator, ClassifierMixin):
         dist: str = "normal",
         mean: str = "zero",
         scale: float = 1.0,
+        returns_multiplier: float = 1.0,
         aux_returns_col: Optional[str] = "Market_Returns",
         rho_weight: float = 0.5,
         C: float = 1.0,
@@ -300,6 +301,7 @@ class DCCGARCHSpikeClassifier(BaseEstimator, ClassifierMixin):
         self.dist = dist
         self.mean = mean
         self.scale = scale
+        self.returns_multiplier = returns_multiplier
         self.aux_returns_col = aux_returns_col
         self.rho_weight = rho_weight
         self.C = C
@@ -323,6 +325,7 @@ class DCCGARCHSpikeClassifier(BaseEstimator, ClassifierMixin):
             dist=self.dist,
             mean=self.mean,
             scale=self.scale,
+            returns_multiplier=self.returns_multiplier,
             horizon=1,
             aux_returns_col=self.aux_returns_col,
             rho_weight=self.rho_weight,

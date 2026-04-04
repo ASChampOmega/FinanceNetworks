@@ -262,7 +262,7 @@ def print_per_ticker_classification(
                 "display.width", None,
             ):
                 print(tdf[display_cols].to_string())
-            if sel_metric in tdf.columns:
+            if sel_metric in tdf.columns and tdf[sel_metric].notna().any():
                 best_idx = tdf[sel_metric].idxmax()
                 best_score = tdf[sel_metric].max()
                 try:
@@ -271,6 +271,8 @@ def print_per_ticker_classification(
                     best_category, best_model = (None, best_idx)
                 print(f"\nBest Model for {ticker}: {best_model} "
                       f"(Category: {best_category}, {sel_metric}: {best_score:.4f})")
+            elif sel_metric in tdf.columns:
+                print(f"\n  (All {sel_metric} values are NaN for {ticker})")
 
 
 def print_compact_clf_leaderboard(

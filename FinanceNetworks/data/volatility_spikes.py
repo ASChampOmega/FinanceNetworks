@@ -33,6 +33,7 @@ from data.preprocess import preprocess_data
 def compute_spike_threshold(
     y_train: pd.Series,
     quantile: float = 0.8,
+    lookback: int | None = None,
 ) -> float:
     """
     Return the *quantile*-th quantile of *y_train* (Y_fwd values in
@@ -43,12 +44,29 @@ def compute_spike_threshold(
     y_train  : Series of forward-RV values from the training fold.
     quantile : Fraction at or above which an observation is a spike.
                0.8 → top-20% of the training distribution is a spike.
+    lookback : If provided, compute the threshold from only the most recent
+               ``lookback`` observations in the training fold. This is useful
+               when an expanding training window spans very different volatility
+               regimes and older crisis periods would otherwise set a stale,
+               overly high threshold.
 
     Returns
     -------
     threshold : float scalar used to label spikes in both train and test sets.
     """
-    return float(np.nanquantile(y_train.values, quantile))
+    if not 0.0 < quantile < 1.0:
+        raise ValueError(f"quantile must lie in (0, 1), got {quantile}")
+
+    y = y_train.dropna()
+    if lookback is not None:
+        if lookback <= 0:
+            raise ValueError(f"lookback must be positive, got {lookback}")
+        y = y.tail(lookback)
+
+    if y.empty:
+        raise ValueError("cannot compute spike threshold from an empty series")
+
+    return float(np.nanquantile(y.values, quantile))
 
 
 def add_spike_label(

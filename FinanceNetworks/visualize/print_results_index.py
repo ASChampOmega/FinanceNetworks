@@ -20,6 +20,7 @@ from visualize.print_results import load_and_print_results
 
 INDEX_SAMPLE_TICKERS = ["SPX2", "FTSE2", "N2252", "GDAXI2", "IXIC2"]
 INDEX_RESULTS_DIR = Path(__file__).parent.parent / "results" / "index_results"
+INDEX_RAW_DISPLAY_SCALE = 10_000.0
 
 
 if __name__ == "__main__":
@@ -78,4 +79,6 @@ if __name__ == "__main__":
         use_log=(args.metric == "log"),
         selection=args.selection,
         present=args.present,
+        raw_metric_display_scale=INDEX_RAW_DISPLAY_SCALE,
+        raw_metric_display_label="10,000 (decimal RV -> percent-squared units)",
     )

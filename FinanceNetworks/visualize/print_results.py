@@ -38,6 +38,28 @@ from visualize.utils import coalesce_categories
 BASELINE_CATEGORIES: frozenset = frozenset({"HAR", "ARIMA", "GARCH", "RegimeSwitching"})
 
 
+def _scale_metric_columns_for_display(
+    metrics_df: pd.DataFrame,
+    raw_metric_scale: float = 1.0,
+) -> pd.DataFrame:
+    """Return a copy with raw error metrics scaled for display only.
+
+    This is intended for cases like the Oxford-Man index pipeline where the
+    target is stored in raw variance units, making RMSE/MAE values look tiny
+    next to the stock pipeline's percent-squared units. Scaling here does not
+    affect any saved results or model ranking because it multiplies all raw
+    error metrics by the same constant.
+    """
+    if raw_metric_scale == 1.0:
+        return metrics_df
+
+    scaled = metrics_df.copy()
+    for col in ("RMSE", "MAE"):
+        if col in scaled.columns:
+            scaled[col] = scaled[col] * raw_metric_scale
+    return scaled
+
+
 # ---------------------------------------------------------------------------
 # Extreme-value filter
 # ---------------------------------------------------------------------------
@@ -1062,6 +1084,8 @@ def load_and_print_results(
     use_log: bool = True,
     selection: str = "r2",
     present: bool = False,
+    raw_metric_display_scale: float = 1.0,
+    raw_metric_display_label: str | None = None,
 ) -> None:
     """
     Load saved JSON results and reprint all summary tables.
@@ -1087,6 +1111,11 @@ def load_and_print_results(
                      ``'median_rmse'``  – rank by median RMSE (lower is better).
     present        : If True, generate condensed presentation-ready tables instead of
                      (or in addition to) the full diagnostic output.
+    raw_metric_display_scale : Display-only multiplier applied to raw RMSE / MAE
+                     columns after loading results. Useful when comparing data
+                     sources stored in different but equivalent variance units.
+    raw_metric_display_label : Optional explanatory label printed when
+                     ``raw_metric_display_scale`` is not 1.0.
     """
     if results_dir is None:
         results_dir = Path(__file__).parent.parent / "results"
@@ -1107,6 +1136,17 @@ def load_and_print_results(
     # Step 1: load and drop numerical blowups at fold level
     metrics_df_raw = pd.read_json(raw_path, orient="records")
     metrics_df_raw = clip_extreme_metrics(metrics_df_raw)
+    metrics_df_raw = _scale_metric_columns_for_display(
+        metrics_df_raw,
+        raw_metric_scale=raw_metric_display_scale,
+    )
+
+    if raw_metric_display_scale != 1.0:
+        label = raw_metric_display_label or f"x{raw_metric_display_scale:g}"
+        print(
+            "Display scaling: raw RMSE / MAE columns are multiplied by "
+            f"{label}."
+        )
 
     # Step 2: coalesce k-variants into super-categories
     metrics_df = coalesce_categories(metrics_df_raw)
