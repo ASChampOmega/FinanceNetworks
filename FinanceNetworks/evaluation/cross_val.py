@@ -428,6 +428,67 @@ def save_prediction_store(
     print(f"Prediction files    -> {out_dir}  ({n_written} tickers)")
 
 
+def select_best_on_validation(
+    metrics_df: pd.DataFrame,
+    val_fold: int = 1,
+    metric: str = "R2_log",
+) -> pd.DataFrame:
+    """
+    Select the best model per category based on validation-fold performance.
+
+    Returns a DataFrame with columns [Category, Model, median_{metric}].
+    """
+    val_rows = metrics_df[metrics_df["Fold"] == val_fold]
+    if val_rows.empty:
+        raise ValueError(f"No rows found for Fold={val_fold}")
+
+    agg = (
+        val_rows.groupby(["Category", "Model"])[metric]
+        .median()
+        .reset_index()
+        .rename(columns={metric: f"median_{metric}"})
+    )
+
+    best_idx = agg.groupby("Category")[f"median_{metric}"].idxmax()
+    best = agg.loc[best_idx, ["Category", "Model", f"median_{metric}"]].reset_index(drop=True)
+    return best
+
+
+def print_best_test_summary(
+    metrics_df: pd.DataFrame,
+    best_models: pd.DataFrame,
+    test_fold: int = 0,
+) -> None:
+    """
+    Print summary for only the best models (selected on validation)
+    evaluated on the test fold.
+    """
+    test_rows = metrics_df[metrics_df["Fold"] == test_fold]
+    best_set = set(zip(best_models["Category"], best_models["Model"]))
+    mask = test_rows.apply(lambda r: (r["Category"], r["Model"]) in best_set, axis=1)
+    test_best = test_rows[mask].copy()
+
+    if test_best.empty:
+        print("No test-fold results for the selected best models.")
+        return
+
+    summary = summarize_benchmarks(test_best)
+    print("\n" + "=" * 80)
+    print("BEST MODELS  (selected on validation fold, evaluated on test fold)")
+    print("=" * 80)
+    print_summary(summary, title="Test-Set Summary (best per category)")
+    print_best_per_category(summary)
+    print_compact_leaderboard(summary)
+
+    # Also print val-fold metrics of the best models for comparison
+    val_rows = metrics_df[metrics_df["Fold"] == 1]
+    val_mask = val_rows.apply(lambda r: (r["Category"], r["Model"]) in best_set, axis=1)
+    val_best = val_rows[val_mask].copy()
+    if not val_best.empty:
+        val_summary = summarize_benchmarks(val_best)
+        print_summary(val_summary, title="Validation-Set Summary (same best models)")
+
+
 def _with_no_outlier_variants(models: Dict[str, Any]) -> Dict[str, Any]:
     """Duplicate a model dictionary with training-only no-outlier variants."""
     augmented: Dict[str, Any] = {}
@@ -745,7 +806,7 @@ def main():
         data_dict,
         baseline_catalogue,
         tickers,
-        n_splits=1,
+        n_splits=2,
         sample_tickers=SAMPLE_TICKERS,
         save_params=True,
     )
@@ -763,7 +824,7 @@ def main():
             dd_net,
             net_catalogue,
             net_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -788,7 +849,7 @@ def main():
             dd_pc,
             pcorr_catalogue,
             pc_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -813,7 +874,7 @@ def main():
             dd_exp,
             exp_catalogue,
             exp_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -838,7 +899,7 @@ def main():
             dd_sq,
             clust_catalogue,
             sq_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -863,7 +924,7 @@ def main():
             dd_mi,
             mi_catalogue,
             mi_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -888,7 +949,7 @@ def main():
             dd_exp,
             expc_catalogue,
             expc_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -913,7 +974,7 @@ def main():
             dd_sq,
             split_catalogue,
             split_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -937,7 +998,7 @@ def main():
             dd_exp,
             splitc_catalogue,
             splitc_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -961,7 +1022,7 @@ def main():
             dd_pc,
             pcorr_split_catalogue,
             pcorr_split_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -985,7 +1046,7 @@ def main():
             dd_exp,
             exp_split_catalogue,
             exp_split_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -1009,7 +1070,7 @@ def main():
             dd_mi,
             mi_split_catalogue,
             mi_split_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -1036,7 +1097,7 @@ def main():
             dd_sq,
             lw_catalogue,
             lw_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -1063,7 +1124,7 @@ def main():
             dd_pc,
             lw_pc_catalogue,
             lw_pc_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -1090,7 +1151,7 @@ def main():
             dd_mi,
             lw_mi_catalogue,
             lw_mi_tickers,
-            n_splits=1,
+            n_splits=2,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -1115,7 +1176,7 @@ def main():
         lwc_tickers = list(dd_sq.keys())
         metrics_lwc, pred_store_lwc, params_lwc = cross_val_multi(
             dd_sq, lwc_catalogue, lwc_tickers,
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, save_params=True,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, save_params=True,
         )
         all_net_metrics.append(metrics_lwc)
         all_params.extend(params_lwc)
@@ -1138,7 +1199,7 @@ def main():
         lwc_pc_tickers = list(dd_pc.keys())
         metrics_lwcp, pred_store_lwcp, params_lwcp = cross_val_multi(
             dd_pc, lwc_pc_catalogue, lwc_pc_tickers,
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, save_params=True,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, save_params=True,
         )
         all_net_metrics.append(metrics_lwcp)
         all_params.extend(params_lwcp)
@@ -1161,7 +1222,7 @@ def main():
         lwc_mi_tickers = list(dd_mi.keys())
         metrics_lwcm, pred_store_lwcm, params_lwcm = cross_val_multi(
             dd_mi, lwc_mi_catalogue, lwc_mi_tickers,
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, save_params=True,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, save_params=True,
         )
         all_net_metrics.append(metrics_lwcm)
         all_params.extend(params_lwcm)
@@ -1181,11 +1242,39 @@ def main():
 
     # Coalesce k-variants into super-categories for printing/plotting
     metrics_coalesced = coalesce_categories(metrics_df)
-    summary = summarize_benchmarks(metrics_coalesced)
 
-    # ── Detailed printing ─────────────────────────────────────────────────────
-    print_summary(summary, title="Full Summary (all stocks)")
-    print_best_per_category(summary)
+    # ── Validation / Test split reporting ─────────────────────────────────────
+    # Fold 1 = validation (earlier year), Fold 0 = test (most recent year).
+    # Select best model per category on the validation fold, then report
+    # performance of those models on the held-out test fold.
+    print("\n" + "=" * 80)
+    print("VALIDATION-FOLD SUMMARY  (Fold 1 — used for model selection)")
+    print("=" * 80)
+    val_metrics = metrics_coalesced[metrics_coalesced["Fold"] == 1]
+    val_summary = summarize_benchmarks(val_metrics)
+    print_summary(val_summary, title="Validation Summary (all models)")
+    print_best_per_category(val_summary)
+
+    print("\n" + "=" * 80)
+    print("TEST-FOLD SUMMARY  (Fold 0 — held-out final evaluation)")
+    print("=" * 80)
+    test_metrics = metrics_coalesced[metrics_coalesced["Fold"] == 0]
+    test_summary = summarize_benchmarks(test_metrics)
+    print_summary(test_summary, title="Test Summary (all models)")
+    print_best_per_category(test_summary)
+
+    # ── Best-model selection on validation, reported on test ─────────────────
+    best_models = select_best_on_validation(metrics_coalesced, val_fold=1)
+    print("\n" + "=" * 80)
+    print("BEST MODEL PER CATEGORY  (chosen on validation fold)")
+    print("=" * 80)
+    print(best_models.to_string(index=False))
+
+    print_best_test_summary(metrics_coalesced, best_models, test_fold=0)
+
+    # ── Legacy full-summary (both folds averaged) for reference ──────────────
+    summary = summarize_benchmarks(metrics_coalesced)
+    print_summary(summary, title="Full Summary — both folds (all stocks)")
     print_compact_leaderboard(summary)
     print_summary_excluding_outliers(metrics_coalesced, r2_threshold=-1.0)
     print_wilcoxon_best_network_vs_baseline(metrics_coalesced)

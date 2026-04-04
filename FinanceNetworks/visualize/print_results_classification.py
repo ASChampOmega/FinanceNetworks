@@ -56,8 +56,6 @@ from visualize.print_results import (
 BASELINE_CATEGORIES_CLF: frozenset = frozenset({
     "HAR-Logit", "HAR-Ext-Logit",
     "RegimeSwitching-Logit", "DCC-GARCH-Logit",
-    "HAR-Logit [balanced]", "HAR-Ext-Logit [balanced]",
-    "RegimeSwitching-Logit [balanced]", "DCC-GARCH-Logit [balanced]",
 })
 
 
@@ -640,6 +638,7 @@ def _print_structural_table_clf(
 def print_presentation_tables_clf(
     metrics_df: pd.DataFrame,
     selection: str = "roc_auc",
+    named_tickers: "Optional[List[str]]" = None,
 ) -> None:
     """Generate presentation-ready summary tables for classification.
 
@@ -708,9 +707,11 @@ def print_presentation_tables_clf(
         best_base_cat, best_base_model, best_net_cat, best_net_model,
         sel_metric, "Bottom 5: Smallest Network Improvement",
     )
+    if named_tickers is None:
+        named_tickers = ["AAPL", "TSLA", "GOOG", "META", "MSFT", "NVDA", "NFLX", "AMZN"]
     _present_per_ticker_table_clf(
         per_ticker,
-        ["AAPL", "TSLA", "GOOG", "META", "MSFT", "NVDA", "NFLX", "AMZN"],
+        named_tickers,
         best_base_cat, best_base_model, best_net_cat, best_net_model,
         sel_metric, "Named Tickers",
     )
@@ -941,7 +942,11 @@ def load_and_print_classification_results(
     print_weighting_scheme_breakdown_clf(metrics_df, selection=selection)
 
     if present:
-        print_presentation_tables_clf(metrics_df, selection=selection)
+        print_presentation_tables_clf(
+            metrics_df,
+            selection=selection,
+            named_tickers=sample_tickers,
+        )
 
     print(f"\n  (Loaded {len(metrics_df_raw)} rows from {raw_path})")
 

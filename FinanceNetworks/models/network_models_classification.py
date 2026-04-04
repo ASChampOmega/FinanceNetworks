@@ -64,6 +64,8 @@ from sklearn.preprocessing import StandardScaler
 # Re-use the shared feature lists and helpers from network_models.py
 from models.network_models import (
     HAR_FEATURES,
+    MARKET_FEATURES,
+    har_features,
     NET_FEATURES,
     CLUSTERING_FEATURES,
     NET_FEATURES_FULL,
@@ -92,12 +94,11 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     )
 
 
-def _make_logit(C: float, max_iter: int, class_weight=None) -> LogisticRegression:
+def _make_logit(C: float, max_iter: int) -> LogisticRegression:
     return LogisticRegression(
         C=C,
         max_iter=max_iter,
         solver="lbfgs",
-        class_weight=class_weight,
     )
 
 
@@ -133,15 +134,15 @@ class NetworkHARClassifier(BaseEstimator, ClassifierMixin):
         max_iter: int = 1_000,
         use_clustering: bool = False,
         use_sign_split: bool = False,
-        class_weight=None,
+        use_market: bool = True,
     ):
         self.C = C
         self.max_iter = max_iter
         self.use_clustering = use_clustering
         self.use_sign_split = use_sign_split
-        self.class_weight = class_weight
+        self.use_market = use_market
         net_feats = _select_net_features(use_clustering, use_sign_split)
-        self.features: List[str] = HAR_FEATURES + net_feats
+        self.features: List[str] = har_features(use_market) + net_feats
         self.model_: Optional[Pipeline] = None
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "NetworkHARClassifier":
@@ -149,7 +150,7 @@ class NetworkHARClassifier(BaseEstimator, ClassifierMixin):
         self.model_ = Pipeline(
             [
                 ("scaler", StandardScaler()),
-                ("clf", _make_logit(self.C, self.max_iter, self.class_weight)),
+                ("clf", _make_logit(self.C, self.max_iter)),
             ]
         )
         self.model_.fit(X_fit, y)
@@ -212,7 +213,7 @@ class NetworkVARClassifier(BaseEstimator, ClassifierMixin):
         use_clustering: bool = False,
         use_sign_split: bool = False,
         max_iter: int = 1_000,
-        class_weight=None,
+        use_market: bool = True,
     ):
         self.C_stage1 = C_stage1
         self.stage2_alpha = stage2_alpha
@@ -220,9 +221,10 @@ class NetworkVARClassifier(BaseEstimator, ClassifierMixin):
         self.use_clustering = use_clustering
         self.use_sign_split = use_sign_split
         self.max_iter = max_iter
-        self.class_weight = class_weight
+        self.use_market = use_market
+        self._har_feats: List[str] = har_features(use_market)
         self._net_feats: List[str] = _select_net_features(use_clustering, use_sign_split)
-        self.features: List[str] = HAR_FEATURES + self._net_feats
+        self.features: List[str] = self._har_feats + self._net_feats
         self._stage1: Optional[Pipeline] = None
         self._stage2: Optional[Pipeline] = None
 
@@ -233,12 +235,12 @@ class NetworkVARClassifier(BaseEstimator, ClassifierMixin):
         self._stage1 = Pipeline(
             [
                 ("scaler", StandardScaler()),
-                ("clf", _make_logit(self.C_stage1, self.max_iter, self.class_weight)),
+                ("clf", _make_logit(self.C_stage1, self.max_iter)),
             ]
         )
-        self._stage1.fit(X[HAR_FEATURES], y)
+        self._stage1.fit(X[self._har_feats], y)
         # decision_function gives shape (n,) log-odds for binary classifiers
-        log_odds = self._stage1.decision_function(X[HAR_FEATURES])
+        log_odds = self._stage1.decision_function(X[self._har_feats])
         p1 = _sigmoid(log_odds)
         return y.values.astype(float) - p1  # probability residuals
 
@@ -263,7 +265,7 @@ class NetworkVARClassifier(BaseEstimator, ClassifierMixin):
         return self
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        log_odds1 = self._stage1.decision_function(X[HAR_FEATURES])
+        log_odds1 = self._stage1.decision_function(X[self._har_feats])
         correction = self._stage2.predict(_fill_net(X)[self._net_feats])
         correction = np.clip(correction, -self.correction_bound, self.correction_bound)
         p_spike = _sigmoid(log_odds1 + correction)
@@ -309,29 +311,30 @@ class LearnedWeightNetworkHARClassifier(BaseEstimator, ClassifierMixin):
         C: float = 1.0,
         max_iter: int = 1_000,
         use_clustering: bool = False,
-        class_weight=None,
+        use_market: bool = True,
     ):
         self.k = k
         self.m = m
         self.C = C
         self.max_iter = max_iter
         self.use_clustering = use_clustering
-        self.class_weight = class_weight
+        self.use_market = use_market
 
         # Build feature list
+        _har = har_features(use_market)
         rank_feats = _knn_rank_features(k)
         struct_feats = ["net_degree", "net_degree_change"]
         if use_clustering:
             struct_feats += CLUSTERING_FEATURES
         self.features: List[str] = _dedupe_preserve_order(
-            HAR_FEATURES + struct_feats + rank_feats
+            _har + struct_feats + rank_feats
         )
 
         self._W: Optional[np.ndarray] = None
         self._pipe: Optional[Pipeline] = None
         self._feat_cols: List[str] = _RANK_FEATURE_COLS
         self._har_and_struct: List[str] = _dedupe_preserve_order(
-            HAR_FEATURES + struct_feats
+            _har + struct_feats
         )
 
     def _extract_nn_tensor(self, X: pd.DataFrame) -> np.ndarray:
@@ -375,7 +378,7 @@ class LearnedWeightNetworkHARClassifier(BaseEstimator, ClassifierMixin):
 
         self._pipe = Pipeline([
             ("scaler", StandardScaler()),
-            ("clf", _make_logit(self.C, self.max_iter, self.class_weight)),
+            ("clf", _make_logit(self.C, self.max_iter)),
         ])
         self._pipe.fit(X_full, y)
         return self

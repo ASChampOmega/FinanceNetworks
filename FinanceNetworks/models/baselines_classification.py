@@ -62,15 +62,13 @@ class HARLogitClassifier(BaseEstimator, ClassifierMixin):
                quickly on standardised features).
     """
 
-    def __init__(self, C: float = 1.0, max_iter: int = 1_000, class_weight=None):
+    def __init__(self, C: float = 1.0, max_iter: int = 1_000, use_market: bool = True):
         self.C = C
         self.max_iter = max_iter
-        self.class_weight = class_weight
-        # Feature set matches the canonical HAR regression model + market features
-        self.features = [
-            "log_RV1", "log_RV5", "log_RV22",
-            "Market_Returns", "log_Market_RV5", "log_Market_RV22",
-        ]
+        self.use_market = use_market
+        self.features = ["log_RV1", "log_RV5", "log_RV22"]
+        if use_market:
+            self.features += ["Market_Returns", "log_Market_RV5", "log_Market_RV22"]
         self.model_: Optional[Pipeline] = None
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "HARLogitClassifier":
@@ -78,7 +76,7 @@ class HARLogitClassifier(BaseEstimator, ClassifierMixin):
             C=self.C,
             max_iter=self.max_iter,
             solver="lbfgs",
-            class_weight=self.class_weight,
+
         )
         self.model_ = Pipeline([("scaler", StandardScaler()), ("clf", clf)])
         self.model_.fit(X[self.features], y)
@@ -115,11 +113,10 @@ class HARExtendedLogitClassifier(BaseEstimator, ClassifierMixin):
     max_iter : Maximum solver iterations.
     """
 
-    def __init__(self, C: float = 1.0, max_iter: int = 1_000, class_weight=None):
+    def __init__(self, C: float = 1.0, max_iter: int = 1_000, use_market: bool = True):
         self.C = C
         self.max_iter = max_iter
-        self.class_weight = class_weight
-        # Feature set mirrors HARExtendedLogRegressor from baselines.py + market features
+        self.use_market = use_market
         self.features = [
             "log_RV1",
             "log_RV5",
@@ -127,10 +124,9 @@ class HARExtendedLogitClassifier(BaseEstimator, ClassifierMixin):
             "log_RV22",
             "log_neg_semi5",
             "log_pos_semi5",
-            "Market_Returns",
-            "log_Market_RV5",
-            "log_Market_RV22",
         ]
+        if use_market:
+            self.features += ["Market_Returns", "log_Market_RV5", "log_Market_RV22"]
         self.model_: Optional[Pipeline] = None
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "HARExtendedLogitClassifier":
@@ -138,7 +134,7 @@ class HARExtendedLogitClassifier(BaseEstimator, ClassifierMixin):
             C=self.C,
             max_iter=self.max_iter,
             solver="lbfgs",
-            class_weight=self.class_weight,
+
         )
         self.model_ = Pipeline([("scaler", StandardScaler()), ("clf", clf)])
         self.model_.fit(X[self.features], y)
@@ -196,18 +192,17 @@ class RegimeSwitchingHARLogitClassifier(BaseEstimator, ClassifierMixin):
         regime_col: str = "log_RV22",
         regime_percentile: float = 0.5,
         min_regime_obs: int = 30,
-        class_weight=None,
+        use_market: bool = True,
     ):
         self.C = C
         self.max_iter = max_iter
         self.regime_col = regime_col
         self.regime_percentile = regime_percentile
         self.min_regime_obs = min_regime_obs
-        self.class_weight = class_weight
-        self.features = [
-            "log_RV1", "log_RV5", "log_RV22",
-            "Market_Returns", "log_Market_RV5", "log_Market_RV22",
-        ]
+        self.use_market = use_market
+        self.features = ["log_RV1", "log_RV5", "log_RV22"]
+        if use_market:
+            self.features += ["Market_Returns", "log_Market_RV5", "log_Market_RV22"]
         self.threshold_: float = 0.0
         self.models_: dict = {}
         self.fallback_model_: Optional[Pipeline] = None
@@ -215,7 +210,7 @@ class RegimeSwitchingHARLogitClassifier(BaseEstimator, ClassifierMixin):
     def _make_pipeline(self) -> Pipeline:
         clf = LogisticRegression(
             C=self.C, max_iter=self.max_iter, solver="lbfgs",
-            class_weight=self.class_weight,
+
         )
         return Pipeline([("scaler", StandardScaler()), ("clf", clf)])
 
@@ -299,7 +294,6 @@ class DCCGARCHSpikeClassifier(BaseEstimator, ClassifierMixin):
         rho_weight: float = 0.5,
         C: float = 1.0,
         max_iter: int = 1_000,
-        class_weight=None,
     ):
         self.p = p
         self.q = q
@@ -310,7 +304,6 @@ class DCCGARCHSpikeClassifier(BaseEstimator, ClassifierMixin):
         self.rho_weight = rho_weight
         self.C = C
         self.max_iter = max_iter
-        self.class_weight = class_weight
 
         self.features = ["log_RV1", "log_RV5", "log_RV22", "Returns"]
         if aux_returns_col is not None:
@@ -342,7 +335,7 @@ class DCCGARCHSpikeClassifier(BaseEstimator, ClassifierMixin):
 
         clf = LogisticRegression(
             C=self.C, max_iter=self.max_iter, solver="lbfgs",
-            class_weight=self.class_weight,
+
         )
         self.calibrator_ = Pipeline([("scaler", StandardScaler()), ("clf", clf)])
         self.calibrator_.fit(x_score, y.values)

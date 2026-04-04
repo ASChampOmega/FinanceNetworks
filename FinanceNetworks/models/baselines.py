@@ -63,13 +63,13 @@ class HARLogRegressor(BaseEstimator, RegressorMixin):
         training slice of each cross-validation fold, preventing data leakage.
     """
 
-    def __init__(self, ridge_alpha: float = 0.0, lasso_alpha: float = 0.0):
+    def __init__(self, ridge_alpha: float = 0.0, lasso_alpha: float = 0.0, use_market: bool = True):
         self.ridge_alpha = ridge_alpha
         self.lasso_alpha = lasso_alpha
-        self.features = [
-            "log_RV1", "log_RV5", "log_RV22",
-            "Market_Returns", "log_Market_RV5", "log_Market_RV22",
-        ]
+        self.use_market = use_market
+        self.features = ["log_RV1", "log_RV5", "log_RV22"]
+        if use_market:
+            self.features += ["Market_Returns", "log_Market_RV5", "log_Market_RV22"]
         self.model_: Optional[Pipeline] = None
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "HARLogRegressor":
@@ -101,9 +101,10 @@ class HARExtendedLogRegressor(BaseEstimator, RegressorMixin):
     to avoid cross-validation data leakage.
     """
 
-    def __init__(self, ridge_alpha: float = 0.0, lasso_alpha: float = 0.0):
+    def __init__(self, ridge_alpha: float = 0.0, lasso_alpha: float = 0.0, use_market: bool = True):
         self.ridge_alpha = ridge_alpha
         self.lasso_alpha = lasso_alpha
+        self.use_market = use_market
         self.features = [
             "log_RV1",
             "log_RV5",
@@ -111,10 +112,9 @@ class HARExtendedLogRegressor(BaseEstimator, RegressorMixin):
             "log_RV22",
             "log_neg_semi5",
             "log_pos_semi5",
-            "Market_Returns",
-            "log_Market_RV5",
-            "log_Market_RV22",
         ]
+        if use_market:
+            self.features += ["Market_Returns", "log_Market_RV5", "log_Market_RV22"]
         self.model_: Optional[Pipeline] = None
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "HARExtendedLogRegressor":
@@ -252,12 +252,14 @@ class GARCHWeeklyRV:
         mean: str = "zero",
         scale: float = 1.0,
         horizon: int = 5,
+        returns_multiplier: float = 1.0,
     ):
         self.p, self.q = p, q
         self.dist = dist
         self.mean = mean
         self.scale = scale
         self.horizon = horizon
+        self.returns_multiplier = returns_multiplier
         self.res_ = None
         # Requires these columns; log_RV* are present so the cross-val loop
         # can slice them without KeyError.
@@ -310,7 +312,7 @@ class GARCHWeeklyRV:
             var_matrix = var_matrix[-n_pred:]
 
         # Sum horizon-step variances and undo scaling.
-        return var_matrix.sum(axis=1) / (self.scale ** 2)
+        return var_matrix.sum(axis=1) / (self.scale ** 2) / (self.returns_multiplier ** 2)
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +350,7 @@ class DCCGARCHWeeklyRV:
         aux_returns_col: Optional[str] = "Market_Returns",
         rho_weight: float = 0.10,
         dcc_start: tuple[float, float] = (0.03, 0.95),
+        returns_multiplier: float = 1.0,
     ):
         self.p = int(p)
         self.q = int(q)
@@ -358,6 +361,7 @@ class DCCGARCHWeeklyRV:
         self.aux_returns_col = aux_returns_col
         self.rho_weight = float(rho_weight)
         self.dcc_start = tuple(map(float, dcc_start))
+        self.returns_multiplier = float(returns_multiplier)
 
         self.features = ["log_RV1", "log_RV5", "log_RV22", "Returns"]
         if aux_returns_col is not None:
@@ -718,7 +722,7 @@ class DCCGARCHWeeklyRV:
                 total += s1 * np.exp(
                     self.rho_weight * rho_k ** 2 * residual
                 )
-            preds[i] = total / (self.scale ** 2)
+            preds[i] = total / (self.scale ** 2) / (self.returns_multiplier ** 2)
 
             z_obs = np.array([z1_test[i], z2_test[i]], dtype=float)
             q_curr = self._dcc_update(q_curr, z_obs)
@@ -770,16 +774,17 @@ class RegimeSwitchingHARLogRegressor(BaseEstimator, RegressorMixin):
         regime_col: str = "log_RV22",
         regime_percentile: float = 0.5,
         min_regime_obs: int = 30,
+        use_market: bool = True,
     ):
         self.ridge_alpha = ridge_alpha
         self.lasso_alpha = lasso_alpha
         self.regime_col = regime_col
         self.regime_percentile = regime_percentile
         self.min_regime_obs = min_regime_obs
-        self.features = [
-            "log_RV1", "log_RV5", "log_RV22",
-            "Market_Returns", "log_Market_RV5", "log_Market_RV22",
-        ]
+        self.use_market = use_market
+        self.features = ["log_RV1", "log_RV5", "log_RV22"]
+        if use_market:
+            self.features += ["Market_Returns", "log_Market_RV5", "log_Market_RV22"]
         self.threshold_: float = 0.0
         self.models_: dict = {}
         self.fallback_model_: Optional[Pipeline] = None

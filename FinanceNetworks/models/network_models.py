@@ -59,6 +59,12 @@ from sklearn.preprocessing import StandardScaler
 # Shared feature lists
 # ---------------------------------------------------------------------------
 
+MARKET_FEATURES: List[str] = [
+    "Market_Returns",
+    "log_Market_RV5",
+    "log_Market_RV22",
+]
+
 HAR_FEATURES: List[str] = [
     "log_RV1",
     "log_RV5",
@@ -72,6 +78,13 @@ HAR_FEATURES: List[str] = [
     "log_Market_RV5",   # 5-day market realised variance (log)
     "log_Market_RV22",  # 22-day market realised variance (log)
 ]
+
+
+def har_features(use_market: bool = True) -> List[str]:
+    """Return HAR feature list, optionally excluding market columns."""
+    if use_market:
+        return list(HAR_FEATURES)
+    return [f for f in HAR_FEATURES if f not in MARKET_FEATURES]
 
 NET_FEATURES: List[str] = [
     "net_degree",
@@ -201,13 +214,15 @@ class NetworkHARRegressor(BaseEstimator, RegressorMixin):
         ridge_alpha: float = 0.0,
         use_clustering: bool = False,
         use_sign_split: bool = False,
+        use_market: bool = True,
     ):
         self.lasso_alpha = lasso_alpha
         self.ridge_alpha = ridge_alpha
         self.use_clustering = use_clustering
         self.use_sign_split = use_sign_split
+        self.use_market = use_market
         net_feats = _select_net_features(use_clustering, use_sign_split)
-        self.features: List[str] = HAR_FEATURES + net_feats
+        self.features: List[str] = har_features(use_market) + net_feats
         self._pipe: Optional[Pipeline] = None
 
     def _make_regressor(self):
@@ -282,13 +297,16 @@ class NetworkVARRegressor(BaseEstimator, RegressorMixin):
         correction_bound: Optional[float] = 0.5,
         use_clustering: bool = False,
         use_sign_split: bool = False,
+        use_market: bool = True,
     ):
         self.stage2_alpha = stage2_alpha
         self.correction_bound = correction_bound
         self.use_clustering = use_clustering
         self.use_sign_split = use_sign_split
+        self.use_market = use_market
+        self._har_feats: List[str] = har_features(use_market)
         self._net_feats: List[str] = _select_net_features(use_clustering, use_sign_split)
-        self.features: List[str] = HAR_FEATURES + self._net_feats
+        self.features: List[str] = self._har_feats + self._net_feats
 
         self._stage1: Optional[Pipeline] = None
         self._stage2: Optional[Pipeline] = None
@@ -300,9 +318,9 @@ class NetworkVARRegressor(BaseEstimator, RegressorMixin):
         self._stage1 = Pipeline(
             [("scaler", StandardScaler()), ("reg", LinearRegression())]
         )
-        self._stage1.fit(X[HAR_FEATURES], log_y)
+        self._stage1.fit(X[self._har_feats], log_y)
         log_pred1 = pd.Series(
-            self._stage1.predict(X[HAR_FEATURES]), index=log_y.index
+            self._stage1.predict(X[self._har_feats]), index=log_y.index
         )
         return log_y - log_pred1   # residuals
 
@@ -330,7 +348,7 @@ class NetworkVARRegressor(BaseEstimator, RegressorMixin):
         return self
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        log_pred1 = self._stage1.predict(X[HAR_FEATURES])
+        log_pred1 = self._stage1.predict(X[self._har_feats])
 
         X_net = _fill_net(X)[self._net_feats]
         correction = self._stage2.predict(X_net)
@@ -385,27 +403,30 @@ class LearnedWeightNetworkHARRegressor(BaseEstimator, RegressorMixin):
         alpha: float = 1.0,
         lasso_alpha: float = 0.0,
         use_clustering: bool = False,
+        use_market: bool = True,
     ):
         self.k = k
         self.m = m
         self.alpha = alpha
         self.lasso_alpha = lasso_alpha
         self.use_clustering = use_clustering
+        self.use_market = use_market
 
         # Build feature list
+        _har = har_features(use_market)
         rank_feats = _knn_rank_features(k)
         struct_feats = ["net_degree", "net_degree_change"]
         if use_clustering:
             struct_feats += CLUSTERING_FEATURES
         self.features: List[str] = _dedupe_preserve_order(
-            HAR_FEATURES + struct_feats + rank_feats
+            _har + struct_feats + rank_feats
         )
 
         self._W: Optional[np.ndarray] = None       # (m, k) projection matrix
         self._pipe: Optional[Pipeline] = None       # final regressor
         self._feat_cols: List[str] = _RANK_FEATURE_COLS
         self._har_and_struct: List[str] = _dedupe_preserve_order(
-            HAR_FEATURES + struct_feats
+            _har + struct_feats
         )
 
     def _extract_nn_tensor(self, X: pd.DataFrame) -> np.ndarray:

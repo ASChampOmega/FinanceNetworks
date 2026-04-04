@@ -382,12 +382,13 @@ def plot_neighbourhood_change(
     save_path: "str | None" = None,
 ):
     """
-    Side-by-side ego-network plots comparing the first and last graph
-    snapshot for each focus ticker.
+    For each focus ticker produce a **dedicated full-page figure** (22 × 11 in)
+    comparing the ego network at the first and last graph snapshot side-by-side.
 
-    For each focus ticker two subplots are drawn:
-    * **Left**  — ego graph at the earliest snapshot.
-    * **Right** — ego graph at the latest snapshot.
+    One figure (and PNG) is emitted per ticker so every plot is large and
+    legible.  When *save_path* is supplied it is used as a filename template:
+    ``_{ticker}`` is inserted before the extension for each output file, e.g.
+    ``neighbourhood_sqcorr_k5_AAPL.png``.
 
     Nodes that are neighbours in **both** snapshots are coloured blue;
     nodes present only in the early snapshot are orange; nodes only in the
@@ -399,7 +400,8 @@ def plot_neighbourhood_change(
     graph_json_path : Path to a saved graph JSON (e.g. ``results/graphs/sqcorr_k5.json``).
     focus_tickers   : Tickers to plot.  Defaults to ``AAPL, NVDA, TSLA, MSFT``.
     k               : Number of nearest neighbours to show per ego graph.
-    save_path       : If given, saves the figure.
+    save_path       : Template path for saved PNGs; ``_{ticker}`` is inserted
+                      before the ``.png`` extension for each ticker.
     """
     if focus_tickers is None:
         focus_tickers = ["AAPL", "NVDA", "TSLA", "MSFT"]
@@ -428,14 +430,15 @@ def plot_neighbourhood_change(
     k_val     = data.get("hyperparams", {}).get("k", k)
     title_suffix = f"{net_class}, k={k_val}"
 
-    n_tickers = len(focus_tickers)
-    fig, axes = plt.subplots(
-        n_tickers, 2,
-        figsize=(16, 5 * n_tickers),
-        squeeze=False,
-    )
+    # Shared legend patches (repeated on every figure)
+    legend_patches = [
+        mpatches.Patch(color="#e74c3c", label="Focus ticker"),
+        mpatches.Patch(color="#3498db", label="Neighbour (both snapshots)"),
+        mpatches.Patch(color="#e67e22", label="Neighbour (first only)"),
+        mpatches.Patch(color="#2ecc71", label="Neighbour (last only)"),
+    ]
 
-    for row, ticker in enumerate(focus_tickers):
+    for ticker in focus_tickers:
         ego_first = _ego_subgraph(G_first, ticker, k)
         ego_last  = _ego_subgraph(G_last,  ticker, k)
 
@@ -443,15 +446,20 @@ def plot_neighbourhood_change(
         nb_last  = set(ego_last.nodes())  - {ticker}
         stable   = nb_first & nb_last
         lost     = nb_first - nb_last
-        gained   = nb_last  - nb_first
+        gained   = nb_last  - nb_first  # noqa: F841  (used implicitly via node_colors)
 
-        for col, (ego, snap_date, snap_label) in enumerate([
+        # One large, dedicated figure per ticker
+        fig, axes = plt.subplots(1, 2, figsize=(22, 11))
+
+        for ax, (ego, snap_date, snap_label) in zip(axes, [
             (ego_first, first_date, "First"),
             (ego_last,  last_date,  "Last"),
         ]):
-            ax = axes[row][col]
             if ego.number_of_nodes() == 0:
-                ax.set_title(f"{ticker} — {snap_label} ({snap_date})\n(not in graph)")
+                ax.set_title(
+                    f"{ticker} — {snap_label} ({snap_date})\n(not in graph)",
+                    fontsize=14, fontweight="bold",
+                )
                 ax.axis("off")
                 continue
 
@@ -461,71 +469,75 @@ def plot_neighbourhood_change(
                 if n == ticker:
                     node_colors.append("#e74c3c")   # red: focus
                 elif n in stable:
-                    node_colors.append("#3498db")    # blue: in both
+                    node_colors.append("#3498db")   # blue: in both
                 elif n in lost:
-                    node_colors.append("#e67e22")    # orange: only in first
+                    node_colors.append("#e67e22")   # orange: only in first
                 else:
-                    node_colors.append("#2ecc71")    # green: only in last
-            # Edge widths (thicker = closer = lower distance)
-            edge_widths = []
-            for u, v, d in ego.edges(data=True):
-                w = d.get("weight", 0.5)
-                edge_widths.append(max(0.5, 4.0 * (1.0 - w)))
+                    node_colors.append("#2ecc71")   # green: only in last
 
-            pos = nx.spring_layout(ego, seed=42, k=2.0)
+            # Edge widths (thicker = closer = lower weight/distance)
+            edge_widths = [
+                max(1.0, 6.0 * (1.0 - d.get("weight", 0.5)))
+                for _, _, d in ego.edges(data=True)
+            ]
+
+            # Generous node spacing so labels never overlap
+            pos = nx.spring_layout(ego, seed=42, k=3.5)
+
             nx.draw_networkx_nodes(
                 ego, pos, ax=ax,
                 node_color=node_colors,
-                node_size=600,
+                node_size=2200,
                 edgecolors="black",
-                linewidths=0.8,
+                linewidths=1.2,
             )
-            nx.draw_networkx_labels(ego, pos, ax=ax, font_size=7, font_weight="bold")
+            nx.draw_networkx_labels(
+                ego, pos, ax=ax,
+                font_size=12, font_weight="bold",
+            )
             nx.draw_networkx_edges(
                 ego, pos, ax=ax,
                 width=edge_widths,
-                alpha=0.6,
+                alpha=0.65,
                 edge_color="grey",
             )
-            # Edge labels: distance
             edge_labels = {
                 (u, v): f"{d.get('weight', 0):.2f}"
                 for u, v, d in ego.edges(data=True)
             }
-            nx.draw_networkx_edge_labels(ego, pos, edge_labels, ax=ax, font_size=6)
+            nx.draw_networkx_edge_labels(
+                ego, pos, edge_labels, ax=ax,
+                font_size=9,
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.7),
+            )
 
             ax.set_title(
                 f"{ticker} — {snap_label} Snapshot ({snap_date})",
-                fontsize=11, fontweight="bold",
+                fontsize=14, fontweight="bold", pad=12,
             )
             ax.axis("off")
 
-    # Build legend
-    legend_patches = [
-        mpatches.Patch(color="#e74c3c", label="Focus ticker"),
-        mpatches.Patch(color="#3498db", label="Neighbour (both snapshots)"),
-        mpatches.Patch(color="#e67e22", label="Neighbour (first only)"),
-        mpatches.Patch(color="#2ecc71", label="Neighbour (last only)"),
-    ]
-    fig.legend(
-        handles=legend_patches,
-        loc="lower center",
-        ncol=4,
-        fontsize=9,
-        framealpha=0.8,
-    )
-    fig.suptitle(
-        f"Neighbourhood Evolution: First vs Last Snapshot  [{title_suffix}]",
-        fontsize=14, fontweight="bold", y=1.01,
-    )
-    fig.tight_layout(rect=[0, 0.04, 1, 1])
+        fig.legend(
+            handles=legend_patches,
+            loc="lower center",
+            ncol=4,
+            fontsize=11,
+            framealpha=0.85,
+        )
+        fig.suptitle(
+            f"Neighbourhood Evolution: {ticker}  [{title_suffix}]",
+            fontsize=15, fontweight="bold", y=1.01,
+        )
+        fig.tight_layout(rect=[0, 0.05, 1, 1])
 
-    if save_path is not None:
-        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        if save_path is not None:
+            p = Path(save_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            ticker_path = p.parent / f"{p.stem}_{ticker}{p.suffix}"
+            fig.savefig(ticker_path, dpi=150, bbox_inches="tight")
 
-    plt.show()
-    plt.close(fig)
+        plt.show()
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------

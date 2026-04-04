@@ -900,6 +900,7 @@ def print_presentation_tables(
     metrics_df: pd.DataFrame,
     use_log: bool = True,
     selection: str = "r2",
+    named_tickers: "Optional[List[str]]" = None,
 ) -> None:
     """Generate presentation-ready summary tables.
 
@@ -978,9 +979,11 @@ def print_presentation_tables(
         best_base_cat, best_base_model, best_net_cat, best_net_model,
         rmse_col, r2_col, "Bottom 5: Smallest Network Improvement",
     )
+    if named_tickers is None:
+        named_tickers = ["AAPL", "TSLA", "GOOG", "META", "MSFT", "NVDA", "NFLX", "AMZN"]
     _present_per_ticker_table(
         per_ticker,
-        ["AAPL", "TSLA", "GOOG", "META", "MSFT", "NVDA", "NFLX", "AMZN"],
+        named_tickers,
         best_base_cat, best_base_model, best_net_cat, best_net_model,
         rmse_col, r2_col, "Named Tickers",
     )
@@ -1127,7 +1130,8 @@ def load_and_print_results(
     print_weighting_scheme_breakdown(metrics_df, use_log=use_log)
 
     if present:
-        print_presentation_tables(metrics_df, use_log=use_log, selection=selection)
+        print_presentation_tables(metrics_df, use_log=use_log, selection=selection,
+                                  named_tickers=sample_tickers)
 
     print(f"\n  (Loaded {len(metrics_df_raw)} rows from {raw_path})")
 

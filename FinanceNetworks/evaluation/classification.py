@@ -40,7 +40,7 @@ from data.volatility_spikes import compute_spike_threshold, add_spike_label
 from data.preprocess import remove_outliers
 
 # Reuse the expanding-window fold generator from cross_val
-from evaluation.cross_val import expanding_folds, _with_no_outlier_variants
+from evaluation.cross_val import expanding_folds, _with_no_outlier_variants, select_best_on_validation
 from evaluation.interpretability import (
     extract_model_params,
     save_model_params,
@@ -132,10 +132,16 @@ def eval_classification(
     Primary evaluation metric is F1 (balances precision and recall,
     robust to class imbalance unlike accuracy).
     """
-    try:
-        auc = float(roc_auc_score(y_true, y_proba))
-    except ValueError:
+    # sklearn may emit UndefinedMetricWarning rather than raising when the
+    # evaluation fold contains only one class. Treat these folds as undefined
+    # for ROC-AUC and let downstream aggregation ignore the NaN.
+    if np.unique(y_true).size < 2:
         auc = float("nan")
+    else:
+        try:
+            auc = float(roc_auc_score(y_true, y_proba))
+        except ValueError:
+            auc = float("nan")
 
     return {
         "F1":              float(f1_score(y_true, y_pred, zero_division=0)),
@@ -570,6 +576,41 @@ def save_classification_prediction_store(
     print(f"Prediction files    -> {out_dir}  ({n_written} tickers)")
 
 
+def print_best_clf_test_summary(
+    metrics_df: pd.DataFrame,
+    best_models: pd.DataFrame,
+    test_fold: int = 0,
+) -> None:
+    """
+    Print classification summary for only the best models (selected on
+    validation fold) evaluated on the test fold.
+    """
+    test_rows = metrics_df[metrics_df["Fold"] == test_fold]
+    best_set = set(zip(best_models["Category"], best_models["Model"]))
+    mask = test_rows.apply(lambda r: (r["Category"], r["Model"]) in best_set, axis=1)
+    test_best = test_rows[mask].copy()
+
+    if test_best.empty:
+        print("No test-fold results for the selected best models.")
+        return
+
+    summary = summarize_classification(test_best)
+    print("\n" + "=" * 80)
+    print("BEST CLASSIFIERS  (selected on validation fold, evaluated on test fold)")
+    print("=" * 80)
+    print_classification_summary(summary, title="Test-Set Classification Summary (best per category)")
+    print_best_classifier(summary)
+    print_compact_clf_leaderboard(summary)
+
+    # Also print val-fold metrics of the best models for comparison
+    val_rows = metrics_df[metrics_df["Fold"] == 1]
+    val_mask = val_rows.apply(lambda r: (r["Category"], r["Model"]) in best_set, axis=1)
+    val_best = val_rows[val_mask].copy()
+    if not val_best.empty:
+        val_summary = summarize_classification(val_best)
+        print_classification_summary(val_summary, title="Validation-Set Summary (same best models)")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -684,110 +725,161 @@ def main():
         },
     }
 
-    def _network_clf_models(class_weight=None) -> Dict[str, Any]:
+    def _network_clf_models() -> Dict[str, Any]:
         """Fresh network classifier instances (needed per k-value run)."""
-        sfx = " Bal" if class_weight is not None else ""
         return _with_no_outlier_variants({
-            f"NetHAR-Logit{sfx} (C=0.1)":          (NetworkHARClassifier(C=0.1,  class_weight=class_weight), False),
-            f"NetHAR-Logit{sfx} (C=1.0)":          (NetworkHARClassifier(C=1.0,  class_weight=class_weight), False),
-            f"NetHAR-Logit{sfx} (C=10.0)":         (NetworkHARClassifier(C=10.0, class_weight=class_weight), False),
-            f"NetVAR-Logit{sfx} (C=1,a=0.1,b=1)":  (NetworkVARClassifier(C_stage1=1.0,
+            "NetHAR-Logit (C=0.1)":           (NetworkHARClassifier(C=0.1),             False),
+            "NetHAR-Logit (C=1.0)":           (NetworkHARClassifier(C=1.0),             False),
+            "NetHAR-Logit (C=10.0)":          (NetworkHARClassifier(C=10.0),            False),
+            "NetHAR-Logit (C=100.0)":         (NetworkHARClassifier(C=100.0),           False),
+            "NetVAR-Logit (C=1,a=0.1,b=1)":   (NetworkVARClassifier(C_stage1=1.0,
                                                                      stage2_alpha=0.1,
-                                                                     correction_bound=1.0,
-                                                                     class_weight=class_weight), False),
-            f"NetVAR-Logit{sfx} (C=1,a=0.5,b=2)":  (NetworkVARClassifier(C_stage1=1.0,
+                                                                     correction_bound=1.0), False),
+            "NetVAR-Logit (C=1,a=0.5,b=2)":   (NetworkVARClassifier(C_stage1=1.0,
                                                                      stage2_alpha=0.5,
-                                                                     correction_bound=2.0,
-                                                                     class_weight=class_weight), False),
-            f"NetVAR-Logit{sfx} (C=1,a=1.0,b=2)":  (NetworkVARClassifier(C_stage1=1.0,
+                                                                     correction_bound=2.0), False),
+            "NetVAR-Logit (C=1,a=1.0,b=2)":   (NetworkVARClassifier(C_stage1=1.0,
                                                                      stage2_alpha=1.0,
-                                                                     correction_bound=2.0,
-                                                                     class_weight=class_weight), False),
+                                                                     correction_bound=2.0), False),
+            "NetVAR-Logit (C=1,a=0.01,b=1)":  (NetworkVARClassifier(C_stage1=1.0,
+                                                                     stage2_alpha=0.01,
+                                                                     correction_bound=1.0), False),
+            "NetVAR-Logit (C=10,a=0.1,b=1)":  (NetworkVARClassifier(C_stage1=10.0,
+                                                                     stage2_alpha=0.1,
+                                                                     correction_bound=1.0), False),
+            "NetVAR-Logit (C=10,a=0.5,b=2)":  (NetworkVARClassifier(C_stage1=10.0,
+                                                                     stage2_alpha=0.5,
+                                                                     correction_bound=2.0), False),
+            "NetVAR-Logit (C=10,a=1.0,b=2)":  (NetworkVARClassifier(C_stage1=10.0,
+                                                                     stage2_alpha=1.0,
+                                                                     correction_bound=2.0), False),
         })
 
-    def _network_clf_models_clustering(class_weight=None) -> Dict[str, Any]:
+    def _network_clf_models_clustering() -> Dict[str, Any]:
         """Network classifier models with clustering features enabled."""
-        sfx = " Bal" if class_weight is not None else ""
         return _with_no_outlier_variants({
-            f"NetHAR+C-Logit{sfx} (C=0.1)":         (NetworkHARClassifier(C=0.1,  use_clustering=True, class_weight=class_weight), False),
-            f"NetHAR+C-Logit{sfx} (C=1.0)":         (NetworkHARClassifier(C=1.0,  use_clustering=True, class_weight=class_weight), False),
-            f"NetVAR+C-Logit{sfx} (C=1,a=0.1,b=1)": (NetworkVARClassifier(C_stage1=1.0,
+            "NetHAR+C-Logit (C=0.1)":          (NetworkHARClassifier(C=0.1,   use_clustering=True), False),
+            "NetHAR+C-Logit (C=1.0)":          (NetworkHARClassifier(C=1.0,   use_clustering=True), False),
+            "NetHAR+C-Logit (C=10.0)":         (NetworkHARClassifier(C=10.0,  use_clustering=True), False),
+            "NetHAR+C-Logit (C=100.0)":        (NetworkHARClassifier(C=100.0, use_clustering=True), False),
+            "NetVAR+C-Logit (C=1,a=0.1,b=1)":  (NetworkVARClassifier(C_stage1=1.0,
                                                                       stage2_alpha=0.1,
                                                                       correction_bound=1.0,
-                                                                      use_clustering=True,
-                                                                      class_weight=class_weight), False),
-            f"NetVAR+C-Logit{sfx} (C=1,a=0.5,b=2)": (NetworkVARClassifier(C_stage1=1.0,
+                                                                      use_clustering=True), False),
+            "NetVAR+C-Logit (C=1,a=0.5,b=2)":  (NetworkVARClassifier(C_stage1=1.0,
                                                                       stage2_alpha=0.5,
                                                                       correction_bound=2.0,
-                                                                      use_clustering=True,
-                                                                      class_weight=class_weight), False),
+                                                                      use_clustering=True), False),
+            "NetVAR+C-Logit (C=10,a=0.1,b=1)": (NetworkVARClassifier(C_stage1=10.0,
+                                                                      stage2_alpha=0.1,
+                                                                      correction_bound=1.0,
+                                                                      use_clustering=True), False),
+            "NetVAR+C-Logit (C=10,a=0.5,b=2)": (NetworkVARClassifier(C_stage1=10.0,
+                                                                      stage2_alpha=0.5,
+                                                                      correction_bound=2.0,
+                                                                      use_clustering=True), False),
         })
 
-    def _network_clf_models_sign_split(class_weight=None) -> Dict[str, Any]:
+    def _network_clf_models_sign_split() -> Dict[str, Any]:
         """Network classifier models with sign-split IDW features."""
-        sfx = " Bal" if class_weight is not None else ""
         return _with_no_outlier_variants({
-            f"NetHAR-Split-Logit{sfx} (C=0.1)":        (NetworkHARClassifier(C=0.1, use_sign_split=True, class_weight=class_weight), False),
-            f"NetHAR-Split-Logit{sfx} (C=1.0)":        (NetworkHARClassifier(C=1.0, use_sign_split=True, class_weight=class_weight), False),
-            f"NetVAR-Split-Logit{sfx} (C=1,a=0.1,b=1)": (NetworkVARClassifier(
+            "NetHAR-Split-Logit (C=0.1)":          (NetworkHARClassifier(C=0.1,   use_sign_split=True), False),
+            "NetHAR-Split-Logit (C=1.0)":          (NetworkHARClassifier(C=1.0,   use_sign_split=True), False),
+            "NetHAR-Split-Logit (C=10.0)":         (NetworkHARClassifier(C=10.0,  use_sign_split=True), False),
+            "NetHAR-Split-Logit (C=100.0)":        (NetworkHARClassifier(C=100.0, use_sign_split=True), False),
+            "NetVAR-Split-Logit (C=1,a=0.1,b=1)":  (NetworkVARClassifier(
                 C_stage1=1.0,
                 stage2_alpha=0.1,
                 correction_bound=1.0,
                 use_sign_split=True,
-                class_weight=class_weight,
+            ), False),
+            "NetVAR-Split-Logit (C=1,a=0.5,b=2)":  (NetworkVARClassifier(
+                C_stage1=1.0,
+                stage2_alpha=0.5,
+                correction_bound=2.0,
+                use_sign_split=True,
+            ), False),
+            "NetVAR-Split-Logit (C=10,a=0.1,b=1)": (NetworkVARClassifier(
+                C_stage1=10.0,
+                stage2_alpha=0.1,
+                correction_bound=1.0,
+                use_sign_split=True,
             ), False),
         })
 
-    def _network_clf_models_sign_split_clustering(class_weight=None) -> Dict[str, Any]:
+    def _network_clf_models_sign_split_clustering() -> Dict[str, Any]:
         """Sign-split network classifier models with clustering features."""
-        sfx = " Bal" if class_weight is not None else ""
         return _with_no_outlier_variants({
-            f"NetHAR+CSplit-Logit{sfx} (C=0.1)": (NetworkHARClassifier(
+            "NetHAR+CSplit-Logit (C=0.1)":          (NetworkHARClassifier(
                 C=0.1,
                 use_clustering=True,
                 use_sign_split=True,
-                class_weight=class_weight,
             ), False),
-            f"NetVAR+CSplit-Logit{sfx} (C=1,a=0.1,b=1)": (NetworkVARClassifier(
+            "NetHAR+CSplit-Logit (C=1.0)":          (NetworkHARClassifier(
+                C=1.0,
+                use_clustering=True,
+                use_sign_split=True,
+            ), False),
+            "NetHAR+CSplit-Logit (C=10.0)":         (NetworkHARClassifier(
+                C=10.0,
+                use_clustering=True,
+                use_sign_split=True,
+            ), False),
+            "NetVAR+CSplit-Logit (C=1,a=0.1,b=1)":  (NetworkVARClassifier(
                 C_stage1=1.0,
                 stage2_alpha=0.1,
                 correction_bound=1.0,
                 use_clustering=True,
                 use_sign_split=True,
-                class_weight=class_weight,
+            ), False),
+            "NetVAR+CSplit-Logit (C=1,a=0.5,b=2)":  (NetworkVARClassifier(
+                C_stage1=1.0,
+                stage2_alpha=0.5,
+                correction_bound=2.0,
+                use_clustering=True,
+                use_sign_split=True,
+            ), False),
+            "NetVAR+CSplit-Logit (C=10,a=0.1,b=1)": (NetworkVARClassifier(
+                C_stage1=10.0,
+                stage2_alpha=0.1,
+                correction_bound=1.0,
+                use_clustering=True,
+                use_sign_split=True,
             ), False),
         })
 
-    def _learned_weight_clf_models(k_val: int, class_weight=None) -> Dict[str, Any]:
+    def _learned_weight_clf_models(k_val: int) -> Dict[str, Any]:
         """Learned m×k weight-matrix classifiers for a given k."""
-        sfx = " Bal" if class_weight is not None else ""
         models: Dict[str, Any] = {}
         max_m = max(1, k_val // 2)
         for m_val in range(1, max_m + 1):
             if m_val >= k_val:
                 continue
-            models[f"LearnedW-Logit{sfx} (m={m_val}, C=1.0)"] = (
-                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=1.0, class_weight=class_weight), False)
-            models[f"LearnedW-Logit{sfx} (m={m_val}, C=0.1)"] = (
-                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=0.1, class_weight=class_weight), False)
-            models[f"LearnedW-Logit{sfx} (m={m_val}, C=10.0)"] = (
-                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=10.0, class_weight=class_weight), False)
+            models[f"LearnedW-Logit (m={m_val}, C=0.1)"] = (
+                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=0.1), False)
+            models[f"LearnedW-Logit (m={m_val}, C=1.0)"] = (
+                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=1.0), False)
+            models[f"LearnedW-Logit (m={m_val}, C=10.0)"] = (
+                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=10.0), False)
+            models[f"LearnedW-Logit (m={m_val}, C=100.0)"] = (
+                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=100.0), False)
         return _with_no_outlier_variants(models)
 
-    def _learned_weight_clf_clustering_models(k_val: int, class_weight=None) -> Dict[str, Any]:
+    def _learned_weight_clf_clustering_models(k_val: int) -> Dict[str, Any]:
         """Learned m×k weight-matrix classifiers with clustering features."""
-        sfx = " Bal" if class_weight is not None else ""
         models: Dict[str, Any] = {}
         max_m = max(1, k_val // 2)
         for m_val in range(1, max_m + 1):
             if m_val >= k_val:
                 continue
-            models[f"LearnedW+C-Logit{sfx} (m={m_val}, C=1.0)"] = (
-                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=1.0, use_clustering=True, class_weight=class_weight), False)
-            models[f"LearnedW+C-Logit{sfx} (m={m_val}, C=0.1)"] = (
-                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=0.1, use_clustering=True, class_weight=class_weight), False)
-            models[f"LearnedW+C-Logit{sfx} (m={m_val}, C=10.0)"] = (
-                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=10.0, use_clustering=True, class_weight=class_weight), False)
+            models[f"LearnedW+C-Logit (m={m_val}, C=0.1)"] = (
+                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=0.1,  use_clustering=True), False)
+            models[f"LearnedW+C-Logit (m={m_val}, C=1.0)"] = (
+                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=1.0,  use_clustering=True), False)
+            models[f"LearnedW+C-Logit (m={m_val}, C=10.0)"] = (
+                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=10.0, use_clustering=True), False)
+            models[f"LearnedW+C-Logit (m={m_val}, C=100.0)"] = (
+                LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=100.0, use_clustering=True), False)
         return _with_no_outlier_variants(models)
 
     # ── Run HAR-Logit baselines ──────────────────────────────────────────────
@@ -796,7 +888,7 @@ def main():
         data_dict,
         baseline_catalogue,
         tickers,
-        n_splits=1,
+        n_splits=2,
         sample_tickers=SAMPLE_TICKERS,
         spike_quantile=0.8,
         save_params=True,
@@ -840,7 +932,7 @@ def main():
         dd_net = data_dicts_net[k_val]
         m_k, ps_k, params_k = classification_cv_multi(
             dd_net, net_cat, list(dd_net.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -862,7 +954,7 @@ def main():
         dd_pc = data_dicts_pcorr[k_val]
         m_pk, ps_pk, params_pk = classification_cv_multi(
             dd_pc, pc_cat, list(dd_pc.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -884,7 +976,7 @@ def main():
         dd_exp = data_dicts_exp[k_val]
         m_ek, ps_ek, params_ek = classification_cv_multi(
             dd_exp, exp_cat, list(dd_exp.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -906,7 +998,7 @@ def main():
         dd_sq = data_dicts_net[k_val]
         m_cl, ps_cl, params_cl = classification_cv_multi(
             dd_sq, cl_cat, list(dd_sq.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -928,7 +1020,7 @@ def main():
         dd_exp = data_dicts_exp[k_val]
         m_ec, ps_ec, params_ec = classification_cv_multi(
             dd_exp, ec_cat, list(dd_exp.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -950,7 +1042,7 @@ def main():
         dd_mi = data_dicts_mi[k_val]
         m_mi, ps_mi, params_mi = classification_cv_multi(
             dd_mi, mi_cat, list(dd_mi.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -972,7 +1064,7 @@ def main():
         dd_sq = data_dicts_net[k_val]
         m_sp, ps_sp, params_sp = classification_cv_multi(
             dd_sq, split_cat, list(dd_sq.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -993,7 +1085,7 @@ def main():
         dd_exp = data_dicts_exp[k_val]
         m_sc, ps_sc, params_sc = classification_cv_multi(
             dd_exp, splitc_cat, list(dd_exp.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -1017,7 +1109,7 @@ def main():
         dd_sq = data_dicts_net[k_val]
         m_lw, ps_lw, params_lw = classification_cv_multi(
             dd_sq, lw_cat, list(dd_sq.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -1041,7 +1133,7 @@ def main():
         dd_pc = data_dicts_pcorr[k_val]
         m_lwp, ps_lwp, params_lwp = classification_cv_multi(
             dd_pc, lw_pc_cat, list(dd_pc.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -1065,7 +1157,7 @@ def main():
         dd_sq = data_dicts_net[k_val]
         m_lwc, ps_lwc, params_lwc = classification_cv_multi(
             dd_sq, lwc_cat, list(dd_sq.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -1089,7 +1181,7 @@ def main():
         dd_pc = data_dicts_pcorr[k_val]
         m_lwcp, ps_lwcp, params_lwcp = classification_cv_multi(
             dd_pc, lwc_pc_cat, list(dd_pc.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -1111,7 +1203,7 @@ def main():
         dd_pc = data_dicts_pcorr[k_val]
         m_ps, ps_ps, params_ps = classification_cv_multi(
             dd_pc, ps_cat, list(dd_pc.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -1133,7 +1225,7 @@ def main():
         dd_exp = data_dicts_exp[k_val]
         m_es, ps_es, params_es = classification_cv_multi(
             dd_exp, es_cat, list(dd_exp.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -1155,7 +1247,7 @@ def main():
         dd_mi = data_dicts_mi[k_val]
         m_ms, ps_ms, params_ms = classification_cv_multi(
             dd_mi, ms_cat, list(dd_mi.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -1179,7 +1271,7 @@ def main():
         dd_mi = data_dicts_mi[k_val]
         m_lwm, ps_lwm, params_lwm = classification_cv_multi(
             dd_mi, lw_mi_cat, list(dd_mi.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -1203,7 +1295,7 @@ def main():
         dd_mi = data_dicts_mi[k_val]
         m_lwcm, ps_lwcm, params_lwcm = classification_cv_multi(
             dd_mi, lwc_mi_cat, list(dd_mi.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
+            n_splits=2, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
             save_params=True,
             num_workers=cv_n_jobs,
         )
@@ -1215,312 +1307,6 @@ def main():
                 pred_store[t] = pred_store[t].join(ps_lwcm[t][new_cols], how="outer")
             else:
                 pred_store[t] = ps_lwcm[t]
-
-    # ── Balanced baselines ────────────────────────────────────────────────────
-    print("\nRunning balanced baseline classifiers...")
-    bal_base_cat: Dict[str, Dict[str, Any]] = {
-        "HAR-Logit [balanced]": {
-            "HAR-Logit Bal (C=0.01)":        (HARLogitClassifier(C=0.01,  class_weight="balanced"), False),
-            "HAR-Logit Bal (C=0.1)":         (HARLogitClassifier(C=0.1,   class_weight="balanced"), False),
-            "HAR-Logit Bal (C=1.0)":         (HARLogitClassifier(C=1.0,   class_weight="balanced"), False),
-            "HAR-Logit Bal (C=10.0)":        (HARLogitClassifier(C=10.0,  class_weight="balanced"), False),
-            "HAR-Logit Bal (C=1.0, no-out)": (HARLogitClassifier(C=1.0,   class_weight="balanced"), True),
-        },
-        "HAR-Ext-Logit [balanced]": {
-            "HAR-Ext-Logit Bal (C=0.01)":        (HARExtendedLogitClassifier(C=0.01,  class_weight="balanced"), False),
-            "HAR-Ext-Logit Bal (C=0.1)":         (HARExtendedLogitClassifier(C=0.1,   class_weight="balanced"), False),
-            "HAR-Ext-Logit Bal (C=1.0)":         (HARExtendedLogitClassifier(C=1.0,   class_weight="balanced"), False),
-            "HAR-Ext-Logit Bal (C=10.0)":        (HARExtendedLogitClassifier(C=10.0,  class_weight="balanced"), False),
-            "HAR-Ext-Logit Bal (C=1.0, no-out)": (HARExtendedLogitClassifier(C=1.0,   class_weight="balanced"), True),
-        },
-        "RegimeSwitching-Logit [balanced]": {
-            "RegHAR-Logit Bal (p50)":        (RegimeSwitchingHARLogitClassifier(regime_percentile=0.5,  class_weight="balanced"), False),
-            "RegHAR-Logit Bal (p75)":        (RegimeSwitchingHARLogitClassifier(regime_percentile=0.75, class_weight="balanced"), False),
-            "RegHAR-Logit Bal (p50, C=0.1)": (RegimeSwitchingHARLogitClassifier(C=0.1, regime_percentile=0.5, class_weight="balanced"), False),
-        },
-        "DCC-GARCH-Logit [balanced]": {
-            "DCC-GARCH-Logit Bal (C=0.1)": (DCCGARCHSpikeClassifier(C=0.1, class_weight="balanced"), False),
-            "DCC-GARCH-Logit Bal (C=1.0)": (DCCGARCHSpikeClassifier(C=1.0, class_weight="balanced"), False),
-        },
-    }
-    m_bb, ps_bb, params_bb = classification_cv_multi(
-        data_dict,
-        bal_base_cat,
-        tickers,
-        n_splits=1,
-        sample_tickers=SAMPLE_TICKERS,
-        spike_quantile=0.8,
-        save_params=True,
-        num_workers=cv_n_jobs,
-    )
-    all_extra_metrics.append(m_bb)
-    all_params.extend(params_bb)
-    for t in ps_bb:
-        new_cols = [c for c in ps_bb[t].columns if c not in ("Y_true_spike",)]
-        if t in pred_store:
-            pred_store[t] = pred_store[t].join(ps_bb[t][new_cols], how="outer")
-        else:
-            pred_store[t] = ps_bb[t]
-
-    # ── Balanced network classifiers (SqCorr) ────────────────────────────────
-    print("\nRunning balanced network classifiers (SqCorr, k=1, 3, 5)...")
-    for k_val in KNN_VALUES:
-        net_bal_cat: Dict[str, Dict[str, Any]] = {
-            f"Network [balanced] [k={k_val}]": _network_clf_models(class_weight="balanced")
-        }
-        dd_net = data_dicts_net[k_val]
-        m_nb, ps_nb, params_nb = classification_cv_multi(
-            dd_net, net_bal_cat, list(dd_net.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
-            save_params=True, num_workers=cv_n_jobs,
-        )
-        all_extra_metrics.append(m_nb)
-        all_params.extend(params_nb)
-        for t in ps_nb:
-            new_cols = [c for c in ps_nb[t].columns if c != "Y_true_spike"]
-            if t in pred_store:
-                pred_store[t] = pred_store[t].join(ps_nb[t][new_cols], how="outer")
-            else:
-                pred_store[t] = ps_nb[t]
-
-    # ── Balanced network classifiers (PCorr) ─────────────────────────────────
-    print("\nRunning balanced network classifiers (PCorr, k=1, 3, 5)...")
-    for k_val in KNN_VALUES:
-        pc_bal_cat: Dict[str, Dict[str, Any]] = {
-            f"PCorr Network [balanced] [k={k_val}]": _network_clf_models(class_weight="balanced")
-        }
-        dd_pc = data_dicts_pcorr[k_val]
-        m_pcb, ps_pcb, params_pcb = classification_cv_multi(
-            dd_pc, pc_bal_cat, list(dd_pc.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
-            save_params=True, num_workers=cv_n_jobs,
-        )
-        all_extra_metrics.append(m_pcb)
-        all_params.extend(params_pcb)
-        for t in ps_pcb:
-            new_cols = [c for c in ps_pcb[t].columns if c != "Y_true_spike"]
-            if t in pred_store:
-                pred_store[t] = pred_store[t].join(ps_pcb[t][new_cols], how="outer")
-            else:
-                pred_store[t] = ps_pcb[t]
-
-    # ── Balanced ExpKernel classifiers ────────────────────────────────────────
-    print("\nRunning balanced network classifiers (ExpKernel, k=1, 3, 5)...")
-    for k_val in KNN_VALUES:
-        exp_bal_cat: Dict[str, Dict[str, Any]] = {
-            f"ExpKernel [balanced] [k={k_val}]": _network_clf_models(class_weight="balanced")
-        }
-        dd_exp = data_dicts_exp[k_val]
-        m_ekb, ps_ekb, params_ekb = classification_cv_multi(
-            dd_exp, exp_bal_cat, list(dd_exp.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
-            save_params=True, num_workers=cv_n_jobs,
-        )
-        all_extra_metrics.append(m_ekb)
-        all_params.extend(params_ekb)
-        for t in ps_ekb:
-            new_cols = [c for c in ps_ekb[t].columns if c != "Y_true_spike"]
-            if t in pred_store:
-                pred_store[t] = pred_store[t].join(ps_ekb[t][new_cols], how="outer")
-            else:
-                pred_store[t] = ps_ekb[t]
-
-    # ── Balanced Clustering classifiers ──────────────────────────────────────
-    print("\nRunning balanced clustering classifiers (k=1, 3, 5)...")
-    for k_val in KNN_VALUES:
-        cl_bal_cat: Dict[str, Dict[str, Any]] = {
-            f"Clustering [balanced] [k={k_val}]": _network_clf_models_clustering(class_weight="balanced")
-        }
-        dd_sq = data_dicts_net[k_val]
-        m_clb, ps_clb, params_clb = classification_cv_multi(
-            dd_sq, cl_bal_cat, list(dd_sq.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
-            save_params=True, num_workers=cv_n_jobs,
-        )
-        all_extra_metrics.append(m_clb)
-        all_params.extend(params_clb)
-        for t in ps_clb:
-            new_cols = [c for c in ps_clb[t].columns if c != "Y_true_spike"]
-            if t in pred_store:
-                pred_store[t] = pred_store[t].join(ps_clb[t][new_cols], how="outer")
-            else:
-                pred_store[t] = ps_clb[t]
-
-    # ── Balanced Exp+Clustering classifiers ──────────────────────────────────
-    print("\nRunning balanced exp-kernel + clustering classifiers (k=1, 3, 5)...")
-    for k_val in KNN_VALUES:
-        ec_bal_cat: Dict[str, Dict[str, Any]] = {
-            f"Exp+Clustering [balanced] [k={k_val}]": _network_clf_models_clustering(class_weight="balanced")
-        }
-        dd_exp = data_dicts_exp[k_val]
-        m_ecb, ps_ecb, params_ecb = classification_cv_multi(
-            dd_exp, ec_bal_cat, list(dd_exp.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
-            save_params=True, num_workers=cv_n_jobs,
-        )
-        all_extra_metrics.append(m_ecb)
-        all_params.extend(params_ecb)
-        for t in ps_ecb:
-            new_cols = [c for c in ps_ecb[t].columns if c != "Y_true_spike"]
-            if t in pred_store:
-                pred_store[t] = pred_store[t].join(ps_ecb[t][new_cols], how="outer")
-            else:
-                pred_store[t] = ps_ecb[t]
-
-    # ── Balanced MI network classifiers ──────────────────────────────────────
-    print("\nRunning balanced MI network classifiers (k=1, 3, 5)...")
-    for k_val in KNN_VALUES:
-        mi_bal_cat: Dict[str, Dict[str, Any]] = {
-            f"MI Network [balanced] [k={k_val}]": _network_clf_models(class_weight="balanced")
-        }
-        dd_mi = data_dicts_mi[k_val]
-        m_mib, ps_mib, params_mib = classification_cv_multi(
-            dd_mi, mi_bal_cat, list(dd_mi.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
-            save_params=True, num_workers=cv_n_jobs,
-        )
-        all_extra_metrics.append(m_mib)
-        all_params.extend(params_mib)
-        for t in ps_mib:
-            new_cols = [c for c in ps_mib[t].columns if c != "Y_true_spike"]
-            if t in pred_store:
-                pred_store[t] = pred_store[t].join(ps_mib[t][new_cols], how="outer")
-            else:
-                pred_store[t] = ps_mib[t]
-
-    # ── Balanced SplitFeatures classifiers ────────────────────────────────────
-    print("\nRunning balanced sign-split classifiers (k=1, 3, 5)...")
-    for k_val in KNN_VALUES:
-        split_bal_cat: Dict[str, Dict[str, Any]] = {
-            f"SplitFeatures [balanced] [k={k_val}]": _network_clf_models_sign_split(class_weight="balanced")
-        }
-        dd_sq = data_dicts_net[k_val]
-        m_spb, ps_spb, params_spb = classification_cv_multi(
-            dd_sq, split_bal_cat, list(dd_sq.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
-            save_params=True, num_workers=cv_n_jobs,
-        )
-        all_extra_metrics.append(m_spb)
-        all_params.extend(params_spb)
-        for t in ps_spb:
-            new_cols = [c for c in ps_spb[t].columns if c != "Y_true_spike"]
-            if t in pred_store:
-                pred_store[t] = pred_store[t].join(ps_spb[t][new_cols], how="outer")
-            else:
-                pred_store[t] = ps_spb[t]
-
-    # ── Balanced Split+Clustering classifiers ─────────────────────────────────
-    print("\nRunning balanced sign-split + clustering classifiers (k=1..5)...")
-    for k_val in KNN_VALUES:
-        splitc_bal_cat: Dict[str, Dict[str, Any]] = {
-            f"Split+Clustering [balanced] [k={k_val}]": _network_clf_models_sign_split_clustering(class_weight="balanced")
-        }
-        dd_exp = data_dicts_exp[k_val]
-        m_scb, ps_scb, params_scb = classification_cv_multi(
-            dd_exp, splitc_bal_cat, list(dd_exp.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
-            save_params=True, num_workers=cv_n_jobs,
-        )
-        all_extra_metrics.append(m_scb)
-        all_params.extend(params_scb)
-        for t in ps_scb:
-            new_cols = [c for c in ps_scb[t].columns if c != "Y_true_spike"]
-            if t in pred_store:
-                pred_store[t] = pred_store[t].join(ps_scb[t][new_cols], how="outer")
-            else:
-                pred_store[t] = ps_scb[t]
-
-    # ── Balanced LearnedWeight classifiers (SqCorr) ───────────────────────────
-    print("\nRunning balanced learned-weight classifiers (k=3..5)...")
-    for k_val in KNN_VALUES:
-        if k_val < 2:
-            continue
-        lw_bal_cat: Dict[str, Dict[str, Any]] = {
-            f"LearnedWeight [balanced] [k={k_val}]": _learned_weight_clf_models(k_val, class_weight="balanced")
-        }
-        dd_sq = data_dicts_net[k_val]
-        m_lwb, ps_lwb, params_lwb = classification_cv_multi(
-            dd_sq, lw_bal_cat, list(dd_sq.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
-            save_params=True, num_workers=cv_n_jobs,
-        )
-        all_extra_metrics.append(m_lwb)
-        all_params.extend(params_lwb)
-        for t in ps_lwb:
-            new_cols = [c for c in ps_lwb[t].columns if c != "Y_true_spike"]
-            if t in pred_store:
-                pred_store[t] = pred_store[t].join(ps_lwb[t][new_cols], how="outer")
-            else:
-                pred_store[t] = ps_lwb[t]
-
-    # ── Balanced LearnedWeight classifiers (PCorr) ────────────────────────────
-    print("\nRunning balanced learned-weight classifiers (PCorr, k=3..5)...")
-    for k_val in KNN_VALUES:
-        if k_val < 2:
-            continue
-        lw_pc_bal_cat: Dict[str, Dict[str, Any]] = {
-            f"PCorr LearnedWeight [balanced] [k={k_val}]": _learned_weight_clf_models(k_val, class_weight="balanced")
-        }
-        dd_pc = data_dicts_pcorr[k_val]
-        m_lwpb, ps_lwpb, params_lwpb = classification_cv_multi(
-            dd_pc, lw_pc_bal_cat, list(dd_pc.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
-            save_params=True, num_workers=cv_n_jobs,
-        )
-        all_extra_metrics.append(m_lwpb)
-        all_params.extend(params_lwpb)
-        for t in ps_lwpb:
-            new_cols = [c for c in ps_lwpb[t].columns if c != "Y_true_spike"]
-            if t in pred_store:
-                pred_store[t] = pred_store[t].join(ps_lwpb[t][new_cols], how="outer")
-            else:
-                pred_store[t] = ps_lwpb[t]
-
-    # ── Balanced LW+Clustering classifiers (SqCorr) ───────────────────────────
-    print("\nRunning balanced learned-weight + clustering classifiers (k=3..5)...")
-    for k_val in KNN_VALUES:
-        if k_val < 2:
-            continue
-        lwc_bal_cat: Dict[str, Dict[str, Any]] = {
-            f"LW+Clustering [balanced] [k={k_val}]": _learned_weight_clf_clustering_models(k_val, class_weight="balanced")
-        }
-        dd_sq = data_dicts_net[k_val]
-        m_lwcb, ps_lwcb, params_lwcb = classification_cv_multi(
-            dd_sq, lwc_bal_cat, list(dd_sq.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
-            save_params=True, num_workers=cv_n_jobs,
-        )
-        all_extra_metrics.append(m_lwcb)
-        all_params.extend(params_lwcb)
-        for t in ps_lwcb:
-            new_cols = [c for c in ps_lwcb[t].columns if c != "Y_true_spike"]
-            if t in pred_store:
-                pred_store[t] = pred_store[t].join(ps_lwcb[t][new_cols], how="outer")
-            else:
-                pred_store[t] = ps_lwcb[t]
-
-    # ── Balanced LW+Clustering classifiers (PCorr) ────────────────────────────
-    print("\nRunning balanced learned-weight + clustering classifiers (PCorr, k=3..5)...")
-    for k_val in KNN_VALUES:
-        if k_val < 2:
-            continue
-        lwc_pc_bal_cat: Dict[str, Dict[str, Any]] = {
-            f"PCorr LW+Clustering [balanced] [k={k_val}]": _learned_weight_clf_clustering_models(k_val, class_weight="balanced")
-        }
-        dd_pc = data_dicts_pcorr[k_val]
-        m_lwcpb, ps_lwcpb, params_lwcpb = classification_cv_multi(
-            dd_pc, lwc_pc_bal_cat, list(dd_pc.keys()),
-            n_splits=1, sample_tickers=SAMPLE_TICKERS, spike_quantile=0.8,
-            save_params=True, num_workers=cv_n_jobs,
-        )
-        all_extra_metrics.append(m_lwcpb)
-        all_params.extend(params_lwcpb)
-        for t in ps_lwcpb:
-            new_cols = [c for c in ps_lwcpb[t].columns if c != "Y_true_spike"]
-            if t in pred_store:
-                pred_store[t] = pred_store[t].join(ps_lwcpb[t][new_cols], how="outer")
-            else:
-                pred_store[t] = ps_lwcpb[t]
 
     # ── Merge all results ─────────────────────────────────────────────────────
     metrics_df = pd.concat([metrics_df] + all_extra_metrics, ignore_index=True)
@@ -1536,6 +1322,31 @@ def main():
         metrics_df, metric_col="ROC_AUC", higher_is_better=True,
     )
     summary = summarize_classification(metrics_coalesced)
+
+    # ── Validation / Test reporting ──────────────────────────────────────────
+    print("\n" + "=" * 80)
+    print("VALIDATION-FOLD SUMMARY  (Fold 1 — used for model selection)")
+    print("=" * 80)
+    val_metrics = metrics_coalesced[metrics_coalesced["Fold"] == 1]
+    val_summary = summarize_classification(val_metrics)
+    print_classification_summary(val_summary, title="Validation Summary (all models)")
+    print_best_classifier(val_summary)
+
+    print("\n" + "=" * 80)
+    print("TEST-FOLD SUMMARY  (Fold 0 — held-out final evaluation)")
+    print("=" * 80)
+    test_metrics = metrics_coalesced[metrics_coalesced["Fold"] == 0]
+    test_summary = summarize_classification(test_metrics)
+    print_classification_summary(test_summary, title="Test Summary (all models)")
+    print_best_classifier(test_summary)
+
+    best_models = select_best_on_validation(metrics_coalesced, val_fold=1, metric="ROC_AUC")
+    print("\n" + "=" * 80)
+    print("BEST CLASSIFIER PER CATEGORY  (chosen on validation fold)")
+    print("=" * 80)
+    print(best_models.to_string(index=False))
+
+    print_best_clf_test_summary(metrics_coalesced, best_models, test_fold=0)
 
     print_classification_summary(summary, title="Classification Summary (all stocks)")
     print_best_classifier(summary)
