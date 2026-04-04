@@ -47,6 +47,10 @@ def plot_ticker_predictions(
     sample_tickers: list,
     save_dir: "str | None" = None,
     use_log: bool = True,
+    year_filter: int | None = 2025,
+    test_only: bool = False,
+    value_display_scale: float = 1.0,
+    value_label: str = "Realized Variance (Y_fwd)",
 ):
     """
     For each ticker plot true Y_fwd against a small set of selected models:
@@ -70,6 +74,14 @@ def plot_ticker_predictions(
     sample_tickers : Tickers to plot.
     save_dir       : If given, saves ``<save_dir>/<ticker>_predictions.png``.
     use_log        : Use RMSE_log (True) or raw RMSE (False) for selection.
+    year_filter    : Optional calendar year to restrict the plot to. If None,
+                     all available rows are shown.
+    test_only      : If True, retain only rows where at least one selected
+                     model prediction is available. This matches the actual
+                     held-out test windows saved in the prediction store.
+    value_display_scale : Display-only multiplier applied to Y_true and model
+                     prediction curves.
+    value_label    : Y-axis label for the plotted values.
     """
     # choose metric column based on selection (log vs raw)
     if "RMSE" not in metrics_df.columns and "RMSE_log" not in metrics_df.columns:
@@ -134,15 +146,27 @@ def plot_ticker_predictions(
         if not curves:
             continue
 
-        # Restrict to 2025 test period
-        df = df[df.index.year == 2025]
-        if df.empty:
+        plot_df = df.copy()
+        if year_filter is not None:
+            plot_df = plot_df[plot_df.index.year == year_filter]
+        if test_only:
+            pred_cols = [col_key for _, col_key, _ in curves if col_key in plot_df.columns]
+            if pred_cols:
+                plot_df = plot_df[plot_df[pred_cols].notna().any(axis=1)]
+        if plot_df.empty:
             continue
+
+        plot_df = plot_df.copy()
+        if value_display_scale != 1.0:
+            cols_to_scale = ["Y_true"] + [col_key for _, col_key, _ in curves]
+            for col in cols_to_scale:
+                if col in plot_df.columns:
+                    plot_df[col] = plot_df[col] * value_display_scale
 
         fig, ax = plt.subplots(figsize=(14, 8))
 
         ax.plot(
-            df.index, df["Y_true"],
+            plot_df.index, plot_df["Y_true"],
             label="True Y_fwd",
             color="black",
             linewidth=1.4,
@@ -153,8 +177,8 @@ def plot_ticker_predictions(
         for grp_key, col_key, label in curves:
             style = group_style[grp_key]
             ax.plot(
-                df.index,
-                df[col_key],
+                plot_df.index,
+                plot_df[col_key],
                 label=label,
                 linewidth=1.0,
                 alpha=0.80,
@@ -165,7 +189,7 @@ def plot_ticker_predictions(
         ax.xaxis.set_major_locator(mdates.YearLocator())
         ax.set_title(f"{ticker} — Model Predictions", fontsize=14, fontweight="bold")
         ax.set_xlabel("Date")
-        ax.set_ylabel("Realized Variance (Y_fwd)")
+        ax.set_ylabel(value_label)
         ax.legend(loc="upper left", fontsize=7.5, framealpha=0.7)
         fig.tight_layout()
 

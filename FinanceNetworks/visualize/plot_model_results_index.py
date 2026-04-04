@@ -29,6 +29,7 @@ from visualize.print_results import summarize_benchmarks
 
 INDEX_SAMPLE_TICKERS = ["SPX2", "FTSE2", "N2252", "GDAXI2", "IXIC2"]
 INDEX_RESULTS_DIR = Path(__file__).parent.parent / "results" / "index_results"
+INDEX_RAW_DISPLAY_SCALE = 10_000.0
 
 
 if __name__ == "__main__":
@@ -99,6 +100,11 @@ if __name__ == "__main__":
         if metric_col in metrics_df.columns:
             metrics_df = metrics_df[metrics_df[metric_col] >= -1e6]
 
+    metrics_df_plot = metrics_df.copy()
+    for metric_col in ("RMSE", "MAE"):
+        if metric_col in metrics_df_plot.columns:
+            metrics_df_plot[metric_col] = metrics_df_plot[metric_col] * INDEX_RAW_DISPLAY_SCALE
+
     pred_dir = results_dir / "predictions_regression"
     pred_store: dict = {}
     if pred_dir.exists():
@@ -126,11 +132,15 @@ if __name__ == "__main__":
             sample_tickers,
             save_dir=str(predictions_dir),
             use_log=use_log,
+            year_filter=None,
+            test_only=True,
+            value_display_scale=INDEX_RAW_DISPLAY_SCALE,
+            value_label="Realized Variance (Y_fwd, percent-squared units)",
         )
 
     if not args.skip_summary:
         summary = summarize_benchmarks(
-            metrics_df,
+            metrics_df_plot,
             use_log=use_log,
             selection=args.selection,
         )
