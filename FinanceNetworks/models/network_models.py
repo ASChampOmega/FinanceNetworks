@@ -369,7 +369,7 @@ class LearnedWeightNetworkHARRegressor(BaseEstimator, RegressorMixin):
     Instead of using fixed IDW weights, this model sorts each ticker's k
     nearest neighbours by ascending distance and applies a **shared** learned
     weight matrix W (m × k) across all feature columns.  This projects the
-    k per-neighbour values for each feature into m < k/2 compressed features,
+    k per-neighbour values for each feature into m < k compressed features,
     capturing the most predictive distance-rank patterns.
 
     The weight matrix W is learned from training data via truncated SVD of the

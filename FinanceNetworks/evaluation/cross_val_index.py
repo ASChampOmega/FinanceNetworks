@@ -95,7 +95,7 @@ def main() -> None:
     SAMPLE_TICKERS = ["SPX2", "FTSE2", "N2252", "GDAXI2", "IXIC2"]
     RESULTS_DIR = Path(__file__).parent.parent / "results" / "index_results"
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    KNN_VALUES = [1, 3, 5]
+    KNN_VALUES = [1, 2, 3, 4, 5]
 
     print("Loading and preprocessing Oxford-Man index data...")
     data_dict = get_index_data_for_har()
@@ -216,10 +216,12 @@ def main() -> None:
 
     def _network_models() -> Dict[str, Any]:
         return _with_no_outlier_variants({
+            "NetHAR (Lasso a=0.20)":          (NetworkHARRegressor(lasso_alpha=0.20, use_market=False),                                          False),
             "NetHAR (Lasso a=0.10)":          (NetworkHARRegressor(lasso_alpha=0.10, use_market=False),                                          False),
             "NetHAR (Lasso a=0.05)":          (NetworkHARRegressor(lasso_alpha=0.05, use_market=False),                                          False),
             "NetHAR (Lasso a=0.01)":          (NetworkHARRegressor(lasso_alpha=0.01, use_market=False),                                          False),
             "NetHAR (OLS)":                   (NetworkHARRegressor(lasso_alpha=0.0, use_market=False),                                           False),
+            "NetHAR (Ridge a=0.01)":          (NetworkHARRegressor(lasso_alpha=0.0, ridge_alpha=0.01, use_market=False),                         False),
             "NetHAR (Ridge a=0.10)":          (NetworkHARRegressor(lasso_alpha=0.0, ridge_alpha=0.10, use_market=False),                         False),
             "NetHAR (Ridge a=1.0)":           (NetworkHARRegressor(lasso_alpha=0.0, ridge_alpha=1.0, use_market=False),                          False),
             "NetworkVAR (a=0.0, b=0.5)":      (NetworkVARRegressor(stage2_alpha=0.0,  correction_bound=0.5, use_market=False),                   False),
@@ -233,11 +235,14 @@ def main() -> None:
 
     def _network_models_clustering() -> Dict[str, Any]:
         return _with_no_outlier_variants({
+            "NetHAR+C (Lasso a=0.20)":        (NetworkHARRegressor(lasso_alpha=0.20, use_clustering=True, use_market=False),                    False),
             "NetHAR+C (Lasso a=0.10)":        (NetworkHARRegressor(lasso_alpha=0.10, use_clustering=True, use_market=False),                    False),
             "NetHAR+C (Lasso a=0.05)":        (NetworkHARRegressor(lasso_alpha=0.05, use_clustering=True, use_market=False),                    False),
             "NetHAR+C (Lasso a=0.01)":        (NetworkHARRegressor(lasso_alpha=0.01, use_clustering=True, use_market=False),                    False),
             "NetHAR+C (OLS)":                 (NetworkHARRegressor(lasso_alpha=0.0,  use_clustering=True, use_market=False),                    False),
+            "NetHAR+C (Ridge a=0.01)":        (NetworkHARRegressor(lasso_alpha=0.0,  ridge_alpha=0.01, use_clustering=True, use_market=False),  False),
             "NetHAR+C (Ridge a=0.10)":        (NetworkHARRegressor(lasso_alpha=0.0,  ridge_alpha=0.10, use_clustering=True, use_market=False),  False),
+            "NetHAR+C (Ridge a=1.0)":         (NetworkHARRegressor(lasso_alpha=0.0,  ridge_alpha=1.0, use_clustering=True, use_market=False),   False),
             "NetworkVAR+C (a=0.0, b=0.5)":    (NetworkVARRegressor(stage2_alpha=0.0,  correction_bound=0.5, use_clustering=True, use_market=False),  False),
             "NetworkVAR+C (a=0.0, b=1.0)":    (NetworkVARRegressor(stage2_alpha=0.0,  correction_bound=1.0, use_clustering=True, use_market=False),  False),
             "NetworkVAR+C (a=0.0, b=None)":   (NetworkVARRegressor(stage2_alpha=0.0,  correction_bound=None, use_clustering=True, use_market=False), False),
@@ -249,11 +254,14 @@ def main() -> None:
 
     def _network_models_sign_split() -> Dict[str, Any]:
         return _with_no_outlier_variants({
+            "NetHAR-Split (Lasso a=0.20)":     (NetworkHARRegressor(lasso_alpha=0.20, use_sign_split=True, use_market=False),                  False),
             "NetHAR-Split (Lasso a=0.10)":     (NetworkHARRegressor(lasso_alpha=0.10, use_sign_split=True, use_market=False),                  False),
             "NetHAR-Split (Lasso a=0.05)":     (NetworkHARRegressor(lasso_alpha=0.05, use_sign_split=True, use_market=False),                  False),
             "NetHAR-Split (Lasso a=0.01)":     (NetworkHARRegressor(lasso_alpha=0.01, use_sign_split=True, use_market=False),                  False),
             "NetHAR-Split (OLS)":              (NetworkHARRegressor(lasso_alpha=0.0,  use_sign_split=True, use_market=False),                  False),
+            "NetHAR-Split (Ridge a=0.01)":     (NetworkHARRegressor(lasso_alpha=0.0,  ridge_alpha=0.01, use_sign_split=True, use_market=False),False),
             "NetHAR-Split (Ridge a=0.10)":     (NetworkHARRegressor(lasso_alpha=0.0,  ridge_alpha=0.10, use_sign_split=True, use_market=False),False),
+            "NetHAR-Split (Ridge a=1.0)":      (NetworkHARRegressor(lasso_alpha=0.0,  ridge_alpha=1.0, use_sign_split=True, use_market=False), False),
             "NetworkVAR-Split (a=0.0, b=0.5)": (NetworkVARRegressor(stage2_alpha=0.0,  correction_bound=0.5, use_sign_split=True, use_market=False),  False),
             "NetworkVAR-Split (a=0.0, b=None)":(NetworkVARRegressor(stage2_alpha=0.0,  correction_bound=None, use_sign_split=True, use_market=False), False),
             "NetworkVAR-Split (a=0.1, b=0.5)": (NetworkVARRegressor(stage2_alpha=0.1,  correction_bound=0.5, use_sign_split=True, use_market=False),  False),
@@ -263,11 +271,14 @@ def main() -> None:
 
     def _network_models_sign_split_clustering() -> Dict[str, Any]:
         return _with_no_outlier_variants({
+            "NetHAR+CSplit (Lasso a=0.20)":    (NetworkHARRegressor(lasso_alpha=0.20, use_clustering=True, use_sign_split=True, use_market=False), False),
             "NetHAR+CSplit (Lasso a=0.01)":    (NetworkHARRegressor(lasso_alpha=0.01, use_clustering=True, use_sign_split=True, use_market=False), False),
             "NetHAR+CSplit (Lasso a=0.05)":    (NetworkHARRegressor(lasso_alpha=0.05, use_clustering=True, use_sign_split=True, use_market=False), False),
-            "NetHAR+CSplit (Lasso a=0)":       (NetworkHARRegressor(lasso_alpha=0.0,  use_clustering=True, use_sign_split=True, use_market=False), False),
+            "NetHAR+CSplit (OLS)":             (NetworkHARRegressor(lasso_alpha=0.0,  use_clustering=True, use_sign_split=True, use_market=False), False),
             "NetHAR+CSplit (Lasso a=0.1)":     (NetworkHARRegressor(lasso_alpha=0.1,  use_clustering=True, use_sign_split=True, use_market=False), False),
+            "NetHAR+CSplit (Ridge a=0.01)":    (NetworkHARRegressor(lasso_alpha=0.0,  ridge_alpha=0.01, use_clustering=True, use_sign_split=True, use_market=False), False),
             "NetHAR+CSplit (Ridge a=0.10)":    (NetworkHARRegressor(lasso_alpha=0.0,  ridge_alpha=0.10, use_clustering=True, use_sign_split=True, use_market=False), False),
+            "NetHAR+CSplit (Ridge a=1.0)":     (NetworkHARRegressor(lasso_alpha=0.0,  ridge_alpha=1.0, use_clustering=True, use_sign_split=True, use_market=False), False),
             "NetworkVAR+CSplit (a=0.0,b=0.5)": (NetworkVARRegressor(stage2_alpha=0.0, correction_bound=0.5, use_clustering=True, use_sign_split=True, use_market=False),  False),
             "NetworkVAR+CSplit (a=0.0,b=None)":(NetworkVARRegressor(stage2_alpha=0.0, correction_bound=None, use_clustering=True, use_sign_split=True, use_market=False), False),
             "NetworkVAR+CSplit (a=0.1,b=0.5)": (NetworkVARRegressor(stage2_alpha=0.1, correction_bound=0.5, use_clustering=True, use_sign_split=True, use_market=False),  False),
@@ -277,28 +288,30 @@ def main() -> None:
 
     def _learned_weight_models(k_val: int) -> Dict[str, Any]:
         models: Dict[str, Any] = {}
-        max_m = max(1, k_val // 2)
-        for m_val in range(1, max_m + 1):
-            if m_val >= k_val:
-                continue
+        for m_val in range(1, k_val):
+            models[f"LearnedW (m={m_val}, Ridge a=0.01)"] = (
+                LearnedWeightNetworkHARRegressor(k=k_val, m=m_val, alpha=0.01, use_market=False), False)
             models[f"LearnedW (m={m_val}, Ridge a=1.0)"] = (
                 LearnedWeightNetworkHARRegressor(k=k_val, m=m_val, alpha=1.0, use_market=False), False)
             models[f"LearnedW (m={m_val}, Ridge a=0.1)"] = (
                 LearnedWeightNetworkHARRegressor(k=k_val, m=m_val, alpha=0.1, use_market=False), False)
+            models[f"LearnedW (m={m_val}, Lasso a=0.01)"] = (
+                LearnedWeightNetworkHARRegressor(k=k_val, m=m_val, lasso_alpha=0.01, use_market=False), False)
             models[f"LearnedW (m={m_val}, Lasso a=0.05)"] = (
                 LearnedWeightNetworkHARRegressor(k=k_val, m=m_val, lasso_alpha=0.05, use_market=False), False)
         return _with_no_outlier_variants(models)
 
     def _learned_weight_clustering_models(k_val: int) -> Dict[str, Any]:
         models: Dict[str, Any] = {}
-        max_m = max(1, k_val // 2)
-        for m_val in range(1, max_m + 1):
-            if m_val >= k_val:
-                continue
+        for m_val in range(1, k_val):
+            models[f"LearnedW+C (m={m_val}, Ridge a=0.01)"] = (
+                LearnedWeightNetworkHARRegressor(k=k_val, m=m_val, alpha=0.01, use_clustering=True, use_market=False), False)
             models[f"LearnedW+C (m={m_val}, Ridge a=1.0)"] = (
                 LearnedWeightNetworkHARRegressor(k=k_val, m=m_val, alpha=1.0, use_clustering=True, use_market=False), False)
             models[f"LearnedW+C (m={m_val}, Ridge a=0.1)"] = (
                 LearnedWeightNetworkHARRegressor(k=k_val, m=m_val, alpha=0.1, use_clustering=True, use_market=False), False)
+            models[f"LearnedW+C (m={m_val}, Lasso a=0.01)"] = (
+                LearnedWeightNetworkHARRegressor(k=k_val, m=m_val, lasso_alpha=0.01, use_clustering=True, use_market=False), False)
             models[f"LearnedW+C (m={m_val}, Lasso a=0.05)"] = (
                 LearnedWeightNetworkHARRegressor(k=k_val, m=m_val, lasso_alpha=0.05, use_clustering=True, use_market=False), False)
         return _with_no_outlier_variants(models)
@@ -477,10 +490,10 @@ def main() -> None:
         _merge_pred_store(pred_store, pred_store_ms)
 
     # ── Learned-weight models (SqCorr) ───────────────────────────────────────
-    print("\nRunning learned-weight models (k=3..5)...")
+    print("\nRunning learned-weight models (k=2..5)...")
     for k_val in KNN_VALUES:
         if k_val < 2:
-            continue
+            continue  # k=1 -> no valid m
         lw_catalogue: Dict[str, Dict[str, Any]] = {
             f"LearnedWeight [k={k_val}]": _learned_weight_models(k_val)
         }
@@ -494,10 +507,10 @@ def main() -> None:
         _merge_pred_store(pred_store, pred_store_lw)
 
     # ── Learned-weight models (PCorr) ────────────────────────────────────────
-    print("\nRunning learned-weight models (PCorr, k=3..5)...")
+    print("\nRunning learned-weight models (PCorr, k=2..5)...")
     for k_val in KNN_VALUES:
         if k_val < 2:
-            continue
+            continue  # k=1 -> no valid m
         lw_pc_catalogue: Dict[str, Dict[str, Any]] = {
             f"PCorr LearnedWeight [k={k_val}]": _learned_weight_models(k_val)
         }
@@ -511,10 +524,10 @@ def main() -> None:
         _merge_pred_store(pred_store, pred_store_lwp)
 
     # ── Learned-weight models (MI) ───────────────────────────────────────────
-    print("\nRunning learned-weight models (MI, k=3..5)...")
+    print("\nRunning learned-weight models (MI, k=2..5)...")
     for k_val in KNN_VALUES:
         if k_val < 2:
-            continue
+            continue  # k=1 -> no valid m
         lw_mi_catalogue: Dict[str, Dict[str, Any]] = {
             f"MI LearnedWeight [k={k_val}]": _learned_weight_models(k_val)
         }
@@ -528,10 +541,10 @@ def main() -> None:
         _merge_pred_store(pred_store, pred_store_lwm)
 
     # ── Learned-weight + clustering (SqCorr) ─────────────────────────────────
-    print("\nRunning learned-weight + clustering models (k=3..5)...")
+    print("\nRunning learned-weight + clustering models (k=2..5)...")
     for k_val in KNN_VALUES:
         if k_val < 2:
-            continue
+            continue  # k=1 -> no valid m
         lwc_catalogue: Dict[str, Dict[str, Any]] = {
             f"LW+Clustering [k={k_val}]": _learned_weight_clustering_models(k_val)
         }
@@ -545,10 +558,10 @@ def main() -> None:
         _merge_pred_store(pred_store, pred_store_lwc)
 
     # ── Learned-weight + clustering (PCorr) ──────────────────────────────────
-    print("\nRunning learned-weight + clustering (PCorr, k=3..5)...")
+    print("\nRunning learned-weight + clustering (PCorr, k=2..5)...")
     for k_val in KNN_VALUES:
         if k_val < 2:
-            continue
+            continue  # k=1 -> no valid m
         lwc_pc_catalogue: Dict[str, Dict[str, Any]] = {
             f"PCorr LW+Clustering [k={k_val}]": _learned_weight_clustering_models(k_val)
         }
@@ -562,10 +575,10 @@ def main() -> None:
         _merge_pred_store(pred_store, pred_store_lwcp)
 
     # ── Learned-weight + clustering (MI) ─────────────────────────────────────
-    print("\nRunning learned-weight + clustering (MI, k=3..5)...")
+    print("\nRunning learned-weight + clustering (MI, k=2..5)...")
     for k_val in KNN_VALUES:
         if k_val < 2:
-            continue
+            continue  # k=1 -> no valid m
         lwc_mi_catalogue: Dict[str, Dict[str, Any]] = {
             f"MI LW+Clustering [k={k_val}]": _learned_weight_clustering_models(k_val)
         }

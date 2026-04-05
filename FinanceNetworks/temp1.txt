@@ -1,0 +1,120 @@
+Loading /home/aaryam/forecast/Econ423-FinalProject/FinanceNetworks/results/classification_results.json ...
+  [stock] 69408 rows, 49 categories, 96 tickers
+
+================================================================================
+  CLASSIFICATION ABLATION STUDY [STOCK]  (metric: ROC_AUC)
+================================================================================
+
+── Best k per distance metric ──
+           distance  k          Best Category                  Best Model  mean_ROC_AUC
+ Mutual Information  1       MI Network [k=1]        NetHAR-Logit (C=0.1)      0.636181
+ Mutual Information  3         MI Split [k=3]  NetHAR-Split-Logit (C=0.1)      0.640417
+ Mutual Information  5 MI LearnedWeight [k=5] LearnedW-Logit (m=1, C=0.1)      0.640846
+Partial Correlation  1    PCorr Network [k=1]        NetHAR-Logit (C=0.1)      0.636725
+Partial Correlation  3    PCorr Network [k=3]        NetHAR-Logit (C=0.1)      0.641508
+Partial Correlation  5    PCorr Network [k=5]        NetHAR-Logit (C=0.1)      0.641513
+Squared Correlation  1  ExpKernel Split [k=1]  NetHAR-Split-Logit (C=0.1)      0.639628
+Squared Correlation  3        ExpKernel [k=3]        NetHAR-Logit (C=0.1)      0.641604
+Squared Correlation  5        ExpKernel [k=5]        NetHAR-Logit (C=1.0)      0.644632
+
+── Best feature structure per distance metric ──
+           distance        structure             Best Category                          Best Model  mean_ROC_AUC
+ Mutual Information       Clustering    MI LW+Clustering [k=5]       LearnedW+C-Logit (m=1, C=0.1)      0.630169
+ Mutual Information            Plain    MI LearnedWeight [k=5]         LearnedW-Logit (m=1, C=0.1)      0.640846
+ Mutual Information            Split            MI Split [k=3]          NetHAR-Split-Logit (C=0.1)      0.640417
+Partial Correlation       Clustering PCorr LW+Clustering [k=5]       LearnedW+C-Logit (m=1, C=1.0)      0.633656
+Partial Correlation            Plain       PCorr Network [k=5]                NetHAR-Logit (C=0.1)      0.641513
+Partial Correlation            Split         PCorr Split [k=5]          NetHAR-Split-Logit (C=0.1)      0.639152
+Squared Correlation       Clustering          Clustering [k=5]      NetVAR+C-Logit (C=1,a=0.5,b=2)      0.637017
+Squared Correlation            Plain           ExpKernel [k=5]                NetHAR-Logit (C=1.0)      0.644632
+Squared Correlation            Split     ExpKernel Split [k=5]          NetHAR-Split-Logit (C=0.1)      0.642190
+Squared Correlation Split+Clustering    Split+Clustering [k=5] NetVAR+CSplit-Logit (C=1,a=0.1,b=1)      0.636531
+
+── Best distance metric per feature structure ──
+       structure            distance             Best Category                          Best Model  mean_ROC_AUC
+      Clustering  Mutual Information    MI LW+Clustering [k=5]       LearnedW+C-Logit (m=1, C=0.1)      0.630169
+      Clustering Partial Correlation PCorr LW+Clustering [k=5]       LearnedW+C-Logit (m=1, C=1.0)      0.633656
+      Clustering Squared Correlation          Clustering [k=5]      NetVAR+C-Logit (C=1,a=0.5,b=2)      0.637017
+           Plain  Mutual Information    MI LearnedWeight [k=5]         LearnedW-Logit (m=1, C=0.1)      0.640846
+           Plain Partial Correlation       PCorr Network [k=5]                NetHAR-Logit (C=0.1)      0.641513
+           Plain Squared Correlation           ExpKernel [k=5]                NetHAR-Logit (C=1.0)      0.644632
+           Split  Mutual Information            MI Split [k=3]          NetHAR-Split-Logit (C=0.1)      0.640417
+           Split Partial Correlation         PCorr Split [k=5]          NetHAR-Split-Logit (C=0.1)      0.639152
+           Split Squared Correlation     ExpKernel Split [k=5]          NetHAR-Split-Logit (C=0.1)      0.642190
+Split+Clustering Squared Correlation    Split+Clustering [k=5] NetVAR+CSplit-Logit (C=1,a=0.1,b=1)      0.636531
+
+── Weighting scheme comparison ──
+weighting       Best Category                  Best Model  mean_ROC_AUC
+      Exp     ExpKernel [k=5]        NetHAR-Logit (C=1.0)      0.644632
+      IDW       Network [k=5]        NetHAR-Logit (C=1.0)      0.644407
+  Learned LearnedWeight [k=5] LearnedW-Logit (m=2, C=0.1)      0.644629
+
+── Baseline vs Network ──
+  Best baseline : HAR-Logit / HAR-Logit (C=0.01)  (ROC_AUC = 0.640002)
+  Best network  : ExpKernel [k=5] / NetHAR-Logit (C=1.0)  (ROC_AUC = 0.644632)
+  → /home/aaryam/forecast/Econ423-FinalProject/FinanceNetworks/results/ablation/ablation_classification_k_by_distance.csv
+  → /home/aaryam/forecast/Econ423-FinalProject/FinanceNetworks/results/ablation/ablation_classification_structure_by_distance.csv
+  → /home/aaryam/forecast/Econ423-FinalProject/FinanceNetworks/results/ablation/ablation_classification_distance_by_structure.csv
+  → /home/aaryam/forecast/Econ423-FinalProject/FinanceNetworks/results/ablation/ablation_classification_weighting.csv
+
+CSV tables saved to /home/aaryam/forecast/Econ423-FinalProject/FinanceNetworks/results/ablation
+Loading /home/aaryam/forecast/Econ423-FinalProject/FinanceNetworks/results/index_results/classification_results.json ...
+  [index] 30366 rows, 49 categories, 21 tickers
+
+================================================================================
+  CLASSIFICATION ABLATION STUDY [INDEX]  (metric: ROC_AUC)
+================================================================================
+
+── Best k per distance metric ──
+           distance  k             Best Category                                  Best Model  mean_ROC_AUC
+ Mutual Information  1          MI Network [k=1]          NetHAR-Logit (C=0.1) (no outliers)      0.801508
+ Mutual Information  3    MI LearnedWeight [k=3]   LearnedW-Logit (m=1, C=0.1) (no outliers)      0.802868
+ Mutual Information  5            MI Split [k=5]                  NetHAR-Split-Logit (C=0.1)      0.802187
+Partial Correlation  1       PCorr Network [k=1]          NetHAR-Logit (C=0.1) (no outliers)      0.798497
+Partial Correlation  3 PCorr LW+Clustering [k=3] LearnedW+C-Logit (m=1, C=0.1) (no outliers)      0.801248
+Partial Correlation  5 PCorr LW+Clustering [k=5]               LearnedW+C-Logit (m=1, C=0.1)      0.805849
+Squared Correlation  1     ExpKernel Split [k=1]    NetHAR-Split-Logit (C=0.1) (no outliers)      0.798204
+Squared Correlation  3             Network [k=3]          NetHAR-Logit (C=0.1) (no outliers)      0.799894
+Squared Correlation  5          Clustering [k=5]                      NetHAR+C-Logit (C=0.1)      0.803939
+
+── Best feature structure per distance metric ──
+           distance        structure             Best Category                                Best Model  mean_ROC_AUC
+ Mutual Information       Clustering    MI LW+Clustering [k=3]             LearnedW+C-Logit (m=1, C=0.1)      0.800838
+ Mutual Information            Plain    MI LearnedWeight [k=3] LearnedW-Logit (m=1, C=0.1) (no outliers)      0.802868
+ Mutual Information            Split            MI Split [k=5]                NetHAR-Split-Logit (C=0.1)      0.802187
+Partial Correlation       Clustering PCorr LW+Clustering [k=5]             LearnedW+C-Logit (m=1, C=0.1)      0.805849
+Partial Correlation            Plain       PCorr Network [k=5]                      NetHAR-Logit (C=0.1)      0.802887
+Partial Correlation            Split         PCorr Split [k=5]                NetHAR-Split-Logit (C=0.1)      0.801886
+Squared Correlation       Clustering          Clustering [k=5]                    NetHAR+C-Logit (C=0.1)      0.803939
+Squared Correlation            Plain             Network [k=5]        NetHAR-Logit (C=0.1) (no outliers)      0.803356
+Squared Correlation            Split       SplitFeatures [k=5]                NetHAR-Split-Logit (C=0.1)      0.799631
+Squared Correlation Split+Clustering    Split+Clustering [k=5]               NetHAR+CSplit-Logit (C=0.1)      0.798129
+
+── Best distance metric per feature structure ──
+       structure            distance             Best Category                                Best Model  mean_ROC_AUC
+      Clustering  Mutual Information    MI LW+Clustering [k=3]             LearnedW+C-Logit (m=1, C=0.1)      0.800838
+      Clustering Partial Correlation PCorr LW+Clustering [k=5]             LearnedW+C-Logit (m=1, C=0.1)      0.805849
+      Clustering Squared Correlation          Clustering [k=5]                    NetHAR+C-Logit (C=0.1)      0.803939
+           Plain  Mutual Information    MI LearnedWeight [k=3] LearnedW-Logit (m=1, C=0.1) (no outliers)      0.802868
+           Plain Partial Correlation       PCorr Network [k=5]                      NetHAR-Logit (C=0.1)      0.802887
+           Plain Squared Correlation             Network [k=5]        NetHAR-Logit (C=0.1) (no outliers)      0.803356
+           Split  Mutual Information            MI Split [k=5]                NetHAR-Split-Logit (C=0.1)      0.802187
+           Split Partial Correlation         PCorr Split [k=5]                NetHAR-Split-Logit (C=0.1)      0.801886
+           Split Squared Correlation       SplitFeatures [k=5]                NetHAR-Split-Logit (C=0.1)      0.799631
+Split+Clustering Squared Correlation    Split+Clustering [k=5]               NetHAR+CSplit-Logit (C=0.1)      0.798129
+
+── Weighting scheme comparison ──
+weighting             Best Category                    Best Model  mean_ROC_AUC
+      Exp      Exp+Clustering [k=5]        NetHAR+C-Logit (C=0.1)      0.802433
+      IDW          Clustering [k=5]        NetHAR+C-Logit (C=0.1)      0.803939
+  Learned PCorr LW+Clustering [k=5] LearnedW+C-Logit (m=1, C=0.1)      0.805849
+
+── Baseline vs Network ──
+  Best baseline : HAR-Ext-Logit / HAR-Ext-Logit (C=0.1)  (ROC_AUC = 0.795005)
+  Best network  : PCorr LW+Clustering [k=5] / LearnedW+C-Logit (m=1, C=0.1)  (ROC_AUC = 0.805849)
+  → /home/aaryam/forecast/Econ423-FinalProject/FinanceNetworks/results/index_results/ablation/ablation_classification_k_by_distance.csv
+  → /home/aaryam/forecast/Econ423-FinalProject/FinanceNetworks/results/index_results/ablation/ablation_classification_structure_by_distance.csv
+  → /home/aaryam/forecast/Econ423-FinalProject/FinanceNetworks/results/index_results/ablation/ablation_classification_distance_by_structure.csv
+  → /home/aaryam/forecast/Econ423-FinalProject/FinanceNetworks/results/index_results/ablation/ablation_classification_weighting.csv
+
+CSV tables saved to /home/aaryam/forecast/Econ423-FinalProject/FinanceNetworks/results/index_results/ablation

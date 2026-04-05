@@ -645,7 +645,7 @@ def main():
     SAMPLE_TICKERS = ["AAPL", "TSLA", "GOOG", "META", "MSFT", "NVDA", "NFLX", "AMZN"]
     RESULTS_DIR = Path(__file__).parent.parent / "results"
     RESULTS_DIR.mkdir(exist_ok=True)
-    KNN_VALUES = [1, 3, 5]
+    KNN_VALUES = [1, 2, 3, 4, 5]
 
     print("Loading and preprocessing data...")
     data_dict = get_data_for_har(100)
@@ -859,10 +859,7 @@ def main():
     def _learned_weight_clf_models(k_val: int) -> Dict[str, Any]:
         """Learned m×k weight-matrix classifiers for a given k."""
         models: Dict[str, Any] = {}
-        max_m = max(1, k_val // 2)
-        for m_val in range(1, max_m + 1):
-            if m_val >= k_val:
-                continue
+        for m_val in range(1, k_val):
             models[f"LearnedW-Logit (m={m_val}, C=0.1)"] = (
                 LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=0.1), False)
             models[f"LearnedW-Logit (m={m_val}, C=1.0)"] = (
@@ -876,10 +873,7 @@ def main():
     def _learned_weight_clf_clustering_models(k_val: int) -> Dict[str, Any]:
         """Learned m×k weight-matrix classifiers with clustering features."""
         models: Dict[str, Any] = {}
-        max_m = max(1, k_val // 2)
-        for m_val in range(1, max_m + 1):
-            if m_val >= k_val:
-                continue
+        for m_val in range(1, k_val):
             models[f"LearnedW+C-Logit (m={m_val}, C=0.1)"] = (
                 LearnedWeightNetworkHARClassifier(k=k_val, m=m_val, C=0.1,  use_clustering=True), False)
             models[f"LearnedW+C-Logit (m={m_val}, C=1.0)"] = (
@@ -1107,10 +1101,10 @@ def main():
                 pred_store[t] = ps_sc[t]
 
     # ── Learned-weight classifiers (SqCorr data) ─────────────────────────────
-    print("\nRunning learned-weight classifiers (k=3..5)...")
+    print("\nRunning learned-weight classifiers (k=2..5)...")
     for k_val in KNN_VALUES:
         if k_val < 2:
-            continue  # m < k/2 → no valid m for k=1
+            continue  # k=1 → no valid m
         lw_cat: Dict[str, Dict[str, Any]] = {
             f"LearnedWeight [k={k_val}]": _learned_weight_clf_models(k_val)
         }
@@ -1131,10 +1125,10 @@ def main():
                 pred_store[t] = ps_lw[t]
 
     # ── Learned-weight classifiers (PCorr data) ──────────────────────────────
-    print("\nRunning learned-weight classifiers (PCorr, k=3..5)...")
+    print("\nRunning learned-weight classifiers (PCorr, k=2..5)...")
     for k_val in KNN_VALUES:
         if k_val < 2:
-            continue
+            continue  # k=1 → no valid m
         lw_pc_cat: Dict[str, Dict[str, Any]] = {
             f"PCorr LearnedWeight [k={k_val}]": _learned_weight_clf_models(k_val)
         }
@@ -1155,10 +1149,10 @@ def main():
                 pred_store[t] = ps_lwp[t]
 
     # ── Learned-weight + clustering classifiers (SqCorr data) ────────────────
-    print("\nRunning learned-weight + clustering classifiers (k=3..5)...")
+    print("\nRunning learned-weight + clustering classifiers (k=2..5)...")
     for k_val in KNN_VALUES:
         if k_val < 2:
-            continue
+            continue  # k=1 → no valid m
         lwc_cat: Dict[str, Dict[str, Any]] = {
             f"LW+Clustering [k={k_val}]": _learned_weight_clf_clustering_models(k_val)
         }
@@ -1179,10 +1173,10 @@ def main():
                 pred_store[t] = ps_lwc[t]
 
     # ── Learned-weight + clustering classifiers (PCorr data) ─────────────────
-    print("\nRunning learned-weight + clustering classifiers (PCorr, k=3..5)...")
+    print("\nRunning learned-weight + clustering classifiers (PCorr, k=2..5)...")
     for k_val in KNN_VALUES:
         if k_val < 2:
-            continue
+            continue  # k=1 → no valid m
         lwc_pc_cat: Dict[str, Dict[str, Any]] = {
             f"PCorr LW+Clustering [k={k_val}]": _learned_weight_clf_clustering_models(k_val)
         }
@@ -1269,10 +1263,10 @@ def main():
                 pred_store[t] = ps_ms[t]
 
     # ── MI learned-weight classifiers ────────────────────────────────────────
-    print("\nRunning MI learned-weight classifiers (k=3..5)...")
+    print("\nRunning MI learned-weight classifiers (k=2..5)...")
     for k_val in KNN_VALUES:
         if k_val < 2:
-            continue
+            continue  # k=1 → no valid m
         lw_mi_cat: Dict[str, Dict[str, Any]] = {
             f"MI LearnedWeight [k={k_val}]": _learned_weight_clf_models(k_val)
         }
@@ -1293,10 +1287,10 @@ def main():
                 pred_store[t] = ps_lwm[t]
 
     # ── MI learned-weight + clustering classifiers ───────────────────────────
-    print("\nRunning MI learned-weight + clustering classifiers (k=3..5)...")
+    print("\nRunning MI learned-weight + clustering classifiers (k=2..5)...")
     for k_val in KNN_VALUES:
         if k_val < 2:
-            continue
+            continue  # k=1 → no valid m
         lwc_mi_cat: Dict[str, Dict[str, Any]] = {
             f"MI LW+Clustering [k={k_val}]": _learned_weight_clf_clustering_models(k_val)
         }
