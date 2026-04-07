@@ -1,0 +1,131 @@
+Loading classification metrics from results/classification_results.json ...
+Priority metric: mean_ROC_AUC
+
+================================================================================
+  k = 1, 2, 3, 4, 5 Breakdown  (by ROC_AUC)
+================================================================================
+                     k1_ROC_AUC  k2_ROC_AUC  k3_ROC_AUC  k4_ROC_AUC  k5_ROC_AUC  k1_F1  k2_F1  k3_F1  k4_F1  k5_F1
+SuperCategory                                                                                                     
+ExpKernel Split          0.6396      0.6393      0.6380      0.6414      0.6422 0.2346 0.2233 0.2335 0.2346 0.2360
+SplitFeatures            0.6390      0.6384      0.6377      0.6406      0.6417 0.2331 0.2242 0.2331 0.2347 0.2364
+ExpKernel                0.6389      0.6410      0.6416      0.6419      0.6446 0.2498 0.2514 0.2564 0.2583 0.2617
+Network                  0.6384      0.6402      0.6413      0.6413      0.6444 0.2509 0.2499 0.2571 0.2577 0.2598
+PCorr Network            0.6367      0.6383      0.6415      0.6407      0.6415 0.2443 0.2455 0.2473 0.2442 0.2457
+MI Network               0.6362      0.6377      0.6380      0.6402      0.6403 0.2505 0.2510 0.2512 0.2553 0.2530
+PCorr Split              0.6359      0.6351      0.6363      0.6359      0.6392 0.2472 0.2468 0.2472 0.2493 0.2450
+MI Split                 0.6356      0.6366      0.6404      0.6364      0.6358 0.2470 0.2487 0.2364 0.2437 0.2465
+Exp+Clustering           0.6356      0.6362      0.6362      0.6363      0.6370 0.2468 0.2468 0.2459 0.2479 0.2482
+Clustering               0.6356      0.6362      0.6362      0.6364      0.6370 0.2471 0.2476 0.2468 0.2480 0.2485
+Split+Clustering         0.6344      0.6370      0.6361      0.6362      0.6365 0.2487 0.2480 0.2473 0.2492 0.2495
+LW+Clustering               NaN      0.6291      0.6283      0.6291      0.6332    NaN 0.2380 0.2413 0.2360 0.2371
+LearnedWeight               NaN      0.6398      0.6409      0.6426      0.6446    NaN 0.2512 0.2565 0.2567 0.2528
+MI LW+Clustering            NaN      0.6254      0.6276      0.6299      0.6300    NaN 0.2332 0.2362 0.2370 0.2359
+MI LearnedWeight            NaN      0.6383      0.6380      0.6404      0.6407    NaN 0.2504 0.2514 0.2532 0.2544
+PCorr LW+Clustering         NaN      0.6262      0.6280      0.6279      0.6337    NaN 0.2338 0.2329 0.2366 0.2424
+PCorr LearnedWeight         NaN      0.6375      0.6397      0.6383      0.6414    NaN 0.2444 0.2454 0.2467 0.2446
+
+================================================================================
+  Weighting Scheme: IDW vs Exp vs Learned  (by ROC_AUC)
+================================================================================
+                                          BestModel  mean_ROC_AUC  mean_F1
+GraphBase WeightScheme                                                    
+SqCorr    Exp                  NetHAR-Logit (C=1.0)        0.6446   0.2617
+          Learned       LearnedW-Logit (m=2, C=0.1)        0.6446   0.2528
+          IDW                  NetHAR-Logit (C=1.0)        0.6444   0.2598
+PCorr     IDW                  NetHAR-Logit (C=0.1)        0.6415   0.2457
+          Learned       LearnedW-Logit (m=1, C=0.1)        0.6414   0.2446
+MI        Learned       LearnedW-Logit (m=1, C=0.1)        0.6407   0.2544
+          IDW            NetHAR-Split-Logit (C=0.1)        0.6404   0.2364
+
+================================================================================
+  PRESENTATION TABLES  (by ROC_AUC)
+================================================================================
+  Best baseline : HAR-Logit / HAR-Logit (C=0.01)
+  Best network  : ExpKernel  / NetHAR-Logit (C=1.0)
+
+================================================================================
+  Per-Ticker Tables
+  Baseline : HAR-Logit / HAR-Logit (C=0.01)
+  Network  : ExpKernel  / HAR-Logit (C=1.0)
+================================================================================
+
+──────────────────────────────────────────────────────────────────────
+  Top 5: Largest Network Improvement
+──────────────────────────────────────────────────────────────────────
+        Base ROC_AUC  Net  ROC_AUC  Base F1  Net  F1
+Ticker                                              
+BAC           0.7087        0.8202   0.2632   0.3158
+PM            0.4700        0.5665   0.1188   0.1509
+PH            0.7376        0.8153   0.2353   0.3590
+WELL          0.5131        0.5888   0.1250   0.1714
+WMT           0.6448        0.7173   0.2245   0.2424
+  → Network wins 5/5 tickers shown.
+
+──────────────────────────────────────────────────────────────────────
+  Bottom 5: Smallest Network Improvement
+──────────────────────────────────────────────────────────────────────
+        Base ROC_AUC  Net  ROC_AUC  Base F1  Net  F1
+Ticker                                              
+RTX           0.5345        0.4616   0.2195   0.2439
+SCHW          0.7448        0.6631   0.0667   0.1579
+MO            0.5497        0.4649   0.0377   0.0000
+MA            0.5848        0.4855   0.2105   0.2051
+NVDA          0.8413        0.6985   0.3103   0.4598
+  → Network wins 0/5 tickers shown.
+
+──────────────────────────────────────────────────────────────────────
+  Named Tickers
+──────────────────────────────────────────────────────────────────────
+        Base ROC_AUC  Net  ROC_AUC  Base F1  Net  F1
+Ticker                                              
+AAPL          0.7599        0.7716   0.3944   0.3562
+TSLA          0.7130        0.6643   0.2895   0.2892
+GOOG          0.7201        0.7041   0.2410   0.3789
+META          0.7538        0.7497   0.5143   0.5128
+MSFT          0.8083        0.8048   0.5263   0.5484
+NVDA          0.8413        0.6985   0.3103   0.4598
+NFLX          0.7261        0.7296   0.2857   0.2917
+AMZN          0.6107        0.6378   0.3380   0.4416
+  → Network wins 3/8 tickers shown.
+
+================================================================================
+  Wilcoxon Signed-Rank Test: Best Network vs Best Baseline (ROC-AUC)
+================================================================================
+  Best baseline : HAR-Logit / HAR-Logit (C=0.01)  (mean ROC_AUC = 0.6400)
+  Best network  : ExpKernel / NetHAR-Logit (C=1.0)  (mean ROC_AUC = 0.6446)
+  Paired tickers (non-zero diff): 96
+  Network wins / Baseline wins: 56 / 40
+  Median(network - baseline ROC_AUC): 0.0076
+  Mean(network - baseline ROC_AUC):   0.0046
+  Two-sided: statistic = 1879.0000, p = 0.100842
+  One-sided (network > baseline): p = 0.050421
+
+================================================================================
+  Graph Distance Comparison  (by ROC_AUC)
+================================================================================
+                     Weighting Structure             Best Model  mean ROC_AUC  mean F1
+Distance                                                                              
+Sq. Corr.          Exp. Kernel     Plain      HAR-Logit (C=1.0)        0.6446   0.2617
+Partial Corr.              IDW     Plain      HAR-Logit (C=0.1)        0.6415   0.2457
+Mutual Info.   Learned Weights     Plain  LW-Logit (m=1, C=0.1)        0.6407   0.2544
+
+================================================================================
+  Weighting Scheme Comparison  (by ROC_AUC)
+================================================================================
+                  Distance Structure             Best Model  mean ROC_AUC  mean F1
+Weighting                                                                         
+IDW              Sq. Corr.     Plain      HAR-Logit (C=1.0)        0.6444   0.2598
+Exp. Kernel      Sq. Corr.     Plain      HAR-Logit (C=1.0)        0.6446   0.2617
+Learned Weights  Sq. Corr.     Plain  LW-Logit (m=2, C=0.1)        0.6446   0.2528
+
+================================================================================
+  Feature Structure Comparison  (by ROC_AUC)
+================================================================================
+                  Distance    Weighting                           Best Model  mean ROC_AUC  mean F1
+Structure                                                                                          
+Plain            Sq. Corr.  Exp. Kernel                    HAR-Logit (C=1.0)        0.6446   0.2617
+Clustering       Sq. Corr.          IDW       NetVAR+C-Logit (C=1,α=0.5,β=2)        0.6370   0.2485
+Split Features   Sq. Corr.  Exp. Kernel              HAR-Split-Logit (C=0.1)        0.6422   0.2360
+Split + Cluster  Sq. Corr.          IDW  NetVAR+CSplit-Logit (C=1,α=0.5,β=2)        0.6370   0.2480
+
+  (Loaded 137760 rows from results/classification_results.json)

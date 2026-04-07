@@ -1,0 +1,129 @@
+Loading fold-level metrics from results/index_results/results_bench.json ...
+Priority metric: log metrics
+Display scaling: raw RMSE / MAE columns are multiplied by 10,000 (decimal RV -> percent-squared units).
+
+================================================================================
+  k = 1, 2, 3, 4, 5 Breakdown  (log metrics)
+================================================================================
+                     k1_RMSE_log  k2_RMSE_log  k3_RMSE_log  k4_RMSE_log  k5_RMSE_log  k1_R2_log  k2_R2_log  k3_R2_log  k4_R2_log  k5_R2_log  k1_%pos  k2_%pos  k3_%pos  k4_%pos  k5_%pos
+SuperCategory                                                                                                                                                                           
+PCorr Split               0.4233       0.4260       0.4229       0.4245       0.4235     0.2541     0.2436     0.2556     0.2500     0.2533   1.0000   0.9524   1.0000   1.0000   0.9524
+PCorr Network             0.4234       0.4234       0.4222       0.4220       0.4206     0.2538     0.2540     0.2581     0.2593     0.2641   1.0000   1.0000   1.0000   1.0000   1.0000
+Clustering                0.4246       0.4245       0.4263       0.4245       0.4247     0.2490     0.2499     0.2425     0.2506     0.2492   1.0000   1.0000   0.9524   1.0000   1.0000
+Exp+Clustering            0.4248       0.4248       0.4263       0.4253       0.4254     0.2484     0.2489     0.2423     0.2475     0.2454   1.0000   1.0000   0.9524   1.0000   0.9048
+MI Network                0.4251       0.4246       0.4238       0.4226       0.4216     0.2478     0.2496     0.2521     0.2562     0.2599   1.0000   1.0000   1.0000   1.0000   1.0000
+Network                   0.4251       0.4251       0.4254       0.4241       0.4236     0.2474     0.2476     0.2470     0.2517     0.2534   1.0000   1.0000   1.0000   1.0000   1.0000
+ExpKernel                 0.4253       0.4254       0.4260       0.4250       0.4247     0.2469     0.2467     0.2449     0.2487     0.2496   1.0000   1.0000   1.0000   1.0000   1.0000
+Split+Clustering          0.4258       0.4256       0.4267       0.4251       0.4259     0.2446     0.2454     0.2418     0.2464     0.2435   1.0000   0.9524   1.0000   0.9524   0.9048
+SplitFeatures             0.4259       0.4260       0.4255       0.4253       0.4259     0.2444     0.2438     0.2455     0.2457     0.2457   0.9524   0.9048   1.0000   0.9524   1.0000
+ExpKernel Split           0.4259       0.4260       0.4261       0.4255       0.4260     0.2442     0.2437     0.2435     0.2451     0.2434   0.9524   0.9048   1.0000   0.9048   0.9048
+MI Split                  0.4262       0.4253       0.4243       0.4241       0.4237     0.2433     0.2480     0.2509     0.2514     0.2528   0.9524   1.0000   1.0000   1.0000   1.0000
+LW+Clustering                NaN       0.4254       0.4262       0.4252       0.4250        NaN     0.2458     0.2427     0.2462     0.2477      NaN   0.9524   0.9524   0.9524   1.0000
+LearnedWeight                NaN       0.4258       0.4260       0.4252       0.4241        NaN     0.2445     0.2436     0.2476     0.2511      NaN   0.9524   0.9524   1.0000   1.0000
+MI LW+Clustering             NaN       0.4254       0.4251       0.4236       0.4228        NaN     0.2459     0.2468     0.2532     0.2560      NaN   0.9524   0.9524   1.0000   1.0000
+MI LearnedWeight             NaN       0.4254       0.4251       0.4238       0.4231        NaN     0.2460     0.2472     0.2526     0.2548      NaN   0.9524   0.9524   1.0000   1.0000
+PCorr LW+Clustering          NaN       0.4235       0.4226       0.4222       0.4211        NaN     0.2532     0.2566     0.2589     0.2622      NaN   0.9524   1.0000   1.0000   1.0000
+PCorr LearnedWeight          NaN       0.4229       0.4223       0.4221       0.4210        NaN     0.2554     0.2577     0.2590     0.2628      NaN   1.0000   1.0000   1.0000   1.0000
+
+================================================================================
+  Weighting Scheme: IDW vs Exp vs Learned  (log metrics)
+================================================================================
+                                                          BestModel  mean_RMSE_log  mean_R2_log  pct_R2_pos
+GraphBase WeightScheme                                                                                     
+PCorr     IDW                            NetHAR (OLS) (no outliers)         0.4206       0.2641      1.0000
+          Learned        LearnedW (m=1, Ridge a=0.01) (no outliers)         0.4210       0.2628      1.0000
+MI        IDW                   NetHAR (Ridge a=0.10) (no outliers)         0.4216       0.2599      1.0000
+          Learned       LearnedW+C (m=1, Ridge a=1.0) (no outliers)         0.4228       0.2560      1.0000
+SqCorr    IDW                    NetHAR (Ridge a=1.0) (no outliers)         0.4236       0.2534      1.0000
+          Learned         LearnedW (m=1, Ridge a=1.0) (no outliers)         0.4241       0.2511      1.0000
+          Exp                    NetHAR (Ridge a=1.0) (no outliers)         0.4247       0.2496      1.0000
+
+================================================================================
+  PRESENTATION TABLES  (log metrics)
+================================================================================
+  Best baseline : RegimeSwitching / RegHAR-Lasso (p50)
+  Best network  : PCorr Network  / NetHAR (OLS) (no outliers)
+
+================================================================================
+  Per-Ticker Tables
+  Baseline : RegimeSwitching / RegHAR-Lasso (p50)
+  Network  : PCorr Network  / HAR (OLS)
+================================================================================
+
+──────────────────────────────────────────────────────────────────────
+  Top 5: Largest Network Improvement
+──────────────────────────────────────────────────────────────────────
+          Base RMSE_log  Net  RMSE_log  Base R2_log  Net  R2_log
+Ticker                                                          
+RUT2             0.5270         0.5025      -0.0127       0.0791
+MXX              0.4458         0.4216      -0.0745       0.0388
+AORD2            0.3714         0.3491       0.2681       0.3531
+STOXX50E         0.4925         0.4720       0.2221       0.2858
+DJI2             0.5068         0.4924       0.1236       0.1728
+  → Network wins 5/5 tickers shown.
+
+──────────────────────────────────────────────────────────────────────
+  Bottom 5: Smallest Network Improvement
+──────────────────────────────────────────────────────────────────────
+        Base RMSE_log  Net  RMSE_log  Base R2_log  Net  R2_log
+Ticker                                                        
+FTSTI          0.2447         0.2450       0.5108       0.5096
+GDAXI2         0.4701         0.4711       0.3951       0.3927
+AEX            0.4196         0.4206       0.2972       0.2939
+NSEI           0.3967         0.3998       0.4714       0.4633
+SSMI           0.3448         0.3676       0.3353       0.2445
+  → Network wins 0/5 tickers shown.
+
+──────────────────────────────────────────────────────────────────────
+  Named Tickers
+──────────────────────────────────────────────────────────────────────
+        Base RMSE_log  Net  RMSE_log  Base R2_log  Net  R2_log
+Ticker                                                        
+SPX2           0.5480         0.5411       0.1903       0.2105
+FTSE2          0.3837         0.3810       0.3565       0.3653
+N2252          0.5075         0.5068       0.3795       0.3813
+GDAXI2         0.4701         0.4711       0.3951       0.3927
+IXIC2          0.4958         0.4871       0.0240       0.0580
+  → Network wins 4/5 tickers shown.
+
+================================================================================
+  Wilcoxon Signed-Rank Test: Best Network vs Best Baseline (log metrics)
+================================================================================
+  Best baseline : RegimeSwitching / RegHAR-Lasso (p50)  (mean RMSE_log = 0.428012)
+  Best network  : PCorr Network / NetHAR (OLS) (no outliers)  (mean RMSE_log = 0.420562)
+  Paired tickers (non-zero diff): 21
+  Network wins / Baseline wins: 16 / 5
+  Median(network - baseline RMSE_log): -0.008105
+  Mean  (network - baseline RMSE_log): -0.007450
+  Two-sided: statistic = 36.0000, p = 0.00428486
+  One-sided (network < baseline): p = 0.00214243
+
+================================================================================
+  Graph Distance Comparison  (log metrics)
+================================================================================
+              Weighting Structure    Best Model  mean RMSE_log  mean R2_log   %R²>0
+Distance                                                                           
+Sq. Corr.           IDW     Plain   HAR (R=1.0)         0.4236       0.2534  100.0%
+Partial Corr.       IDW     Plain     HAR (OLS)         0.4206       0.2641  100.0%
+Mutual Info.        IDW     Plain  HAR (R=0.10)         0.4216       0.2599  100.0%
+
+================================================================================
+  Weighting Scheme Comparison  (log metrics)
+================================================================================
+                      Distance Structure        Best Model  mean RMSE_log  mean R2_log   %R²>0
+Weighting                                                                                     
+IDW              Partial Corr.     Plain         HAR (OLS)         0.4206       0.2641  100.0%
+Exp. Kernel          Sq. Corr.     Plain       HAR (R=1.0)         0.4247       0.2496  100.0%
+Learned Weights  Partial Corr.     Plain  LW (m=1, R=0.01)         0.4210       0.2628  100.0%
+
+================================================================================
+  Feature Structure Comparison  (log metrics)
+================================================================================
+                      Distance        Weighting          Best Model  mean RMSE_log  mean R2_log   %R²>0
+Structure                                                                                              
+Plain            Partial Corr.              IDW           HAR (OLS)         0.4206       0.2641  100.0%
+Clustering       Partial Corr.  Learned Weights  LW+C (m=1, R=0.01)         0.4211       0.2622  100.0%
+Split Features   Partial Corr.              IDW  HAR-Split (R=0.10)         0.4229       0.2556  100.0%
+Split + Cluster      Sq. Corr.              IDW     HAR+CS (L=0.01)         0.4251       0.2464   95.2%
+
+  (Loaded 45780 rows from results/index_results/results_bench.json)
