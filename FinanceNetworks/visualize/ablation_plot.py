@@ -41,6 +41,23 @@ _DISTANCE_ORDER = ["Squared Correlation", "Partial Correlation", "Mutual Informa
 _STRUCTURE_ORDER = ["Plain", "Clustering", "Split", "Split+Clustering"]
 _WEIGHTING_ORDER = ["IDW", "Exp", "Learned"]
 
+_DISTANCE_LABELS = {
+    "Squared Correlation": "Sq. Corr.",
+    "Partial Correlation": "Partial Corr.",
+    "Mutual Information": "Mutual Info.",
+}
+_STRUCTURE_LABELS = {
+    "Plain": "Plain",
+    "Clustering": "Clustering",
+    "Split": "Split Features",
+    "Split+Clustering": "Split + Cluster",
+}
+_WEIGHTING_LABELS = {
+    "IDW": "IDW",
+    "Exp": "Exp. Kernel",
+    "Learned": "Learned Weights",
+}
+
 _DISTANCE_COLORS = {
     "Squared Correlation": "#1f77b4",
     "Partial Correlation": "#ff7f0e",
@@ -178,6 +195,25 @@ def _agg_best_per_group(
     return pd.DataFrame(rows)
 
 
+def _best_metric_per_value(
+    df: pd.DataFrame,
+    group_col: str,
+    values: list,
+    metric: str,
+    lower_is_better: bool,
+) -> list[float]:
+    """Return one best aggregated metric per dimension value."""
+    vals: list[float] = []
+    for value in values:
+        sub = df[df[group_col] == value]
+        if sub.empty:
+            vals.append(np.nan)
+            continue
+        best = _best_model_in_group(sub, metric, lower_is_better)
+        vals.append(best[metric])
+    return vals
+
+
 # ---------------------------------------------------------------------------
 # 1. Best k line/bar chart (one series per distance metric)
 # ---------------------------------------------------------------------------
@@ -189,29 +225,27 @@ def plot_best_k(
     save_path: Path | None = None,
     title_suffix: str = "",
 ):
-    """Line plot: x = k, y = best mean metric, one line per distance."""
+    """Line plot: x = k, y = best mean metric, aggregated across all networks."""
     net = df[df["k"].notna()].copy()
+    if net.empty:
+        return
+
+    k_vals = sorted(int(k) for k in net["k"].dropna().unique())
+    if not k_vals:
+        return
+
+    means = _best_metric_per_value(net, "k", k_vals, metric, lower_is_better)
+
     fig, ax = plt.subplots(figsize=(7, 4.5))
 
-    for dist in _DISTANCE_ORDER:
-        g_dist = net[net["distance"] == dist]
-        if g_dist.empty:
-            continue
-        k_vals = sorted(g_dist["k"].unique())
-        means = []
-        for k in k_vals:
-            g_k = g_dist[g_dist["k"] == k]
-            best = _best_model_in_group(g_k, metric, lower_is_better)
-            means.append(best[metric])
-        ax.plot([int(k) for k in k_vals], means, "o-",
-                label=dist, color=_DISTANCE_COLORS.get(dist))
+    ax.plot(k_vals, means, "o-", color="#1f77b4", linewidth=2)
 
     ax.set_xlabel("k (number of neighbours)")
     ax.set_ylabel(f"Best mean {metric}")
     ax.set_title(f"Effect of k on Best Model Performance{title_suffix}")
-    ax.legend()
     ax.grid(True, alpha=0.3)
     _annotate_line_points(ax)
+    _zoom_y(ax, lower_is_better)
     if save_path:
         fig.savefig(save_path)
         print(f"  → {save_path}")
@@ -229,36 +263,21 @@ def plot_structure(
     save_path: Path | None = None,
     title_suffix: str = "",
 ):
-    """Grouped bar chart: groups = distance, bars = feature structure."""
+    """Bar chart: one overall best-result bar per feature structure."""
     net = df[df["structure"].notna()].copy()
-    distances = [d for d in _DISTANCE_ORDER if d in net["distance"].unique()]
     structures = [s for s in _STRUCTURE_ORDER if s in net["structure"].unique()]
 
-    if not distances or not structures:
+    if not structures:
         return
 
-    x = np.arange(len(distances))
-    width = 0.8 / len(structures)
-    fig, ax = plt.subplots(figsize=(8, 5))
+    vals = _best_metric_per_value(net, "structure", structures, metric, lower_is_better)
+    labels = [_STRUCTURE_LABELS.get(struct, struct) for struct in structures]
+    colors = [_STRUCTURE_COLORS.get(struct, "#999") for struct in structures]
 
-    for i, struct in enumerate(structures):
-        vals = []
-        for dist in distances:
-            sub = net[(net["distance"] == dist) & (net["structure"] == struct)]
-            if sub.empty:
-                vals.append(np.nan)
-            else:
-                best = _best_model_in_group(sub, metric, lower_is_better)
-                vals.append(best[metric])
-        offset = (i - len(structures) / 2 + 0.5) * width
-        ax.bar(x + offset, vals, width, label=struct,
-               color=_STRUCTURE_COLORS.get(struct))
-
-    ax.set_xticks(x)
-    ax.set_xticklabels([d.replace(" ", "\n") for d in distances])
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.bar(labels, vals, color=colors)
     ax.set_ylabel(f"Best mean {metric}")
     ax.set_title(f"Feature Structure Comparison{title_suffix}")
-    ax.legend()
     ax.grid(True, alpha=0.3, axis="y")
     _annotate_bars(ax)
     _zoom_y(ax, lower_is_better)
@@ -279,36 +298,21 @@ def plot_distance(
     save_path: Path | None = None,
     title_suffix: str = "",
 ):
-    """Grouped bar chart: groups = structure, bars = distance."""
+    """Bar chart: one overall best-result bar per distance metric."""
     net = df[df["distance"].notna()].copy()
-    structures = [s for s in _STRUCTURE_ORDER if s in net["structure"].unique()]
     distances = [d for d in _DISTANCE_ORDER if d in net["distance"].unique()]
 
-    if not structures or not distances:
+    if not distances:
         return
 
-    x = np.arange(len(structures))
-    width = 0.8 / len(distances)
-    fig, ax = plt.subplots(figsize=(8, 5))
+    vals = _best_metric_per_value(net, "distance", distances, metric, lower_is_better)
+    labels = [_DISTANCE_LABELS.get(dist, dist) for dist in distances]
+    colors = [_DISTANCE_COLORS.get(dist, "#999") for dist in distances]
 
-    for i, dist in enumerate(distances):
-        vals = []
-        for struct in structures:
-            sub = net[(net["structure"] == struct) & (net["distance"] == dist)]
-            if sub.empty:
-                vals.append(np.nan)
-            else:
-                best = _best_model_in_group(sub, metric, lower_is_better)
-                vals.append(best[metric])
-        offset = (i - len(distances) / 2 + 0.5) * width
-        ax.bar(x + offset, vals, width, label=dist,
-               color=_DISTANCE_COLORS.get(dist))
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(structures)
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.bar(labels, vals, color=colors)
     ax.set_ylabel(f"Best mean {metric}")
     ax.set_title(f"Distance Metric Comparison{title_suffix}")
-    ax.legend()
     ax.grid(True, alpha=0.3, axis="y")
     _annotate_bars(ax)
     _zoom_y(ax, lower_is_better)
@@ -329,21 +333,18 @@ def plot_weighting(
     save_path: Path | None = None,
     title_suffix: str = "",
 ):
-    """Simple bar chart: weighting scheme vs best metric."""
+    """Bar chart: one overall best-result bar per weighting scheme."""
     net = df[df["weighting"].notna()].copy()
     schemes = [w for w in _WEIGHTING_ORDER if w in net["weighting"].unique()]
     if not schemes:
         return
 
-    vals = []
-    for w in schemes:
-        g = net[net["weighting"] == w]
-        best = _best_model_in_group(g, metric, lower_is_better)
-        vals.append(best[metric])
+    vals = _best_metric_per_value(net, "weighting", schemes, metric, lower_is_better)
+    labels = [_WEIGHTING_LABELS.get(w, w) for w in schemes]
 
-    fig, ax = plt.subplots(figsize=(5, 4))
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
     colors = [_WEIGHTING_COLORS.get(w, "#999") for w in schemes]
-    ax.bar(schemes, vals, color=colors)
+    ax.bar(labels, vals, color=colors)
     ax.set_ylabel(f"Best mean {metric}")
     ax.set_title(f"Weighting Scheme Comparison{title_suffix}")
     ax.grid(True, alpha=0.3, axis="y")
@@ -368,7 +369,7 @@ def plot_baseline_vs_network(
     title_suffix: str = "",
 ):
     baselines = df[df["Category"].isin(baseline_cats)]
-    networks = df[df["k"].notna()]
+    networks = df[~df["Category"].isin(baseline_cats)]
     if baselines.empty or networks.empty:
         return
 

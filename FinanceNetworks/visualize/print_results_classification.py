@@ -16,6 +16,7 @@ print_classification_summary      : Print the full summary table.
 print_best_classifier             : Print the single best model per category.
 print_overall_best                : Print the single globally best model.
 print_per_ticker_classification   : Print per-ticker metrics for sample tickers.
+print_presentation_report_clf     : Print the concise presentation-only report.
 load_and_print_classification_results : Load saved JSON results and reprint.
 """
 
@@ -390,7 +391,7 @@ def print_per_ticker_network_vs_baseline_clf(
 
 
 # ---------------------------------------------------------------------------
-# k=1 / k=3 / k=5 breakdown (classification)
+# k breakdown (classification)
 # ---------------------------------------------------------------------------
 
 def print_k_breakdown_clf(
@@ -441,18 +442,26 @@ def print_k_breakdown_clf(
         return
 
     raw_df    = pd.DataFrame(rows)
+    k_values = sorted(raw_df["k"].unique())
+
     pivot_sel = raw_df.pivot(index="SuperCategory", columns="k", values=f"mean_{sel_metric}")
+    pivot_sel = pivot_sel.reindex(columns=k_values)
     pivot_sel.columns = [f"k{k}_{sel_metric}" for k in pivot_sel.columns]
     pivot_f1  = raw_df.pivot(index="SuperCategory", columns="k", values="mean_F1")
+    pivot_f1  = pivot_f1.reindex(columns=k_values)
     pivot_f1.columns  = [f"k{k}_F1" for k in pivot_f1.columns]
 
     combined = pd.concat([pivot_sel, pivot_f1], axis=1)
+    ordered_cols = [f"k{k}_{sel_metric}" for k in k_values] + [f"k{k}_F1" for k in k_values]
+    combined = combined.reindex(columns=ordered_cols)
     first_sel = [c for c in combined.columns if sel_metric in c]
     if first_sel:
         combined = combined.sort_values(first_sel[0], ascending=False, na_position="last")
 
+    k_label = ", ".join(str(k) for k in k_values)
+
     print(f"\n{'=' * 80}")
-    print(f"  k=1 / k=3 / k=5 Breakdown  (by {sel_metric})")
+    print(f"  k = {k_label} Breakdown  (by {sel_metric})")
     print(f"{'=' * 80}")
     with pd.option_context(
         "display.float_format", "{:.4f}".format,
@@ -878,6 +887,22 @@ def print_wilcoxon_best_network_vs_baseline_clf(
     print(f"  One-sided (network > baseline): p = {float(test_greater.pvalue):.6g}")
 
 
+def print_presentation_report_clf(
+    metrics_df_raw: pd.DataFrame,
+    metrics_df: pd.DataFrame,
+    selection: str = "roc_auc",
+    named_tickers: "Optional[List[str]]" = None,
+) -> None:
+    """Print the concise classification report used for presentation logs."""
+    print_k_breakdown_clf(metrics_df_raw, selection=selection)
+    print_weighting_scheme_breakdown_clf(metrics_df, selection=selection)
+    print_presentation_tables_clf(
+        metrics_df,
+        selection=selection,
+        named_tickers=named_tickers,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Load-from-disk entry point
 # ---------------------------------------------------------------------------
@@ -887,6 +912,7 @@ def load_and_print_classification_results(
     sample_tickers: "Optional[List[str]]" = None,
     selection: str = "roc_auc",
     present: bool = False,
+    present_only: bool = False,
 ) -> None:
     """
     Load saved classification JSON results and reprint all summary tables.
@@ -931,24 +957,32 @@ def load_and_print_classification_results(
     # Step 3: build summary
     summary = summarize_classification(metrics_df, selection=selection)
 
-    print_classification_summary(summary, title="Classification Summary (from saved results)")
-    print_best_classifier(summary, selection=selection)
-    print_compact_clf_leaderboard(summary, selection=selection)
-    print_overall_best(summary, selection=selection)
-    print_wilcoxon_best_network_vs_baseline_clf(metrics_df)
-    print_per_ticker_network_vs_baseline_clf(metrics_df, sample_tickers, selection=selection)
-    print_per_ticker_classification(metrics_df, sample_tickers, selection=selection)
-
-    # Structural breakdowns (k-breakdown uses pre-coalesce data)
-    print_k_breakdown_clf(metrics_df_raw, selection=selection)
-    print_weighting_scheme_breakdown_clf(metrics_df, selection=selection)
-
-    if present:
-        print_presentation_tables_clf(
+    if present_only:
+        print_presentation_report_clf(
+            metrics_df_raw,
             metrics_df,
             selection=selection,
             named_tickers=sample_tickers,
         )
+    else:
+        print_classification_summary(summary, title="Classification Summary (from saved results)")
+        print_best_classifier(summary, selection=selection)
+        print_compact_clf_leaderboard(summary, selection=selection)
+        print_overall_best(summary, selection=selection)
+        print_wilcoxon_best_network_vs_baseline_clf(metrics_df)
+        print_per_ticker_network_vs_baseline_clf(metrics_df, sample_tickers, selection=selection)
+        print_per_ticker_classification(metrics_df, sample_tickers, selection=selection)
+
+        # Structural breakdowns (k-breakdown uses pre-coalesce data)
+        print_k_breakdown_clf(metrics_df_raw, selection=selection)
+        print_weighting_scheme_breakdown_clf(metrics_df, selection=selection)
+
+        if present:
+            print_presentation_tables_clf(
+                metrics_df,
+                selection=selection,
+                named_tickers=sample_tickers,
+            )
 
     print(f"\n  (Loaded {len(metrics_df_raw)} rows from {raw_path})")
 
@@ -990,10 +1024,19 @@ if __name__ == "__main__":
             "comparison tables (distance / weighting / structure)."
         ),
     )
+    parser.add_argument(
+        "--present-only",
+        action="store_true",
+        help=(
+            "Print only the presentation-oriented classification report: k breakdown, "
+            "weighting-scheme breakdown, Wilcoxon, and all presentation tables."
+        ),
+    )
     args = parser.parse_args()
     load_and_print_classification_results(
         results_dir=args.results_dir,
         sample_tickers=args.tickers,
         selection=args.selection,
         present=args.present,
+        present_only=args.present_only,
     )

@@ -71,6 +71,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Generate condensed presentation-ready tables.",
     )
+    parser.add_argument(
+        "--present-only",
+        action="store_true",
+        help="Print only the presentation-oriented regression report.",
+    )
     args = parser.parse_args()
     load_and_print_results(
         results_dir=args.results_dir,
@@ -79,6 +84,7 @@ if __name__ == "__main__":
         use_log=(args.metric == "log"),
         selection=args.selection,
         present=args.present,
+        present_only=args.present_only,
         raw_metric_display_scale=INDEX_RAW_DISPLAY_SCALE,
         raw_metric_display_label="10,000 (decimal RV -> percent-squared units)",
     )

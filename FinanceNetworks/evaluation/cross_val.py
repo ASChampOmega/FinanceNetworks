@@ -1,3 +1,4 @@
+import argparse
 import copy
 import multiprocessing as mp
 from tqdm import tqdm
@@ -507,6 +508,15 @@ def _with_no_outlier_variants(models: Dict[str, Any]) -> Dict[str, Any]:
 def main():
     import os
     import sys
+    parser = argparse.ArgumentParser(description="Stock regression evaluation")
+    parser.add_argument(
+        "--use-validation-split",
+        action="store_true",
+        help="Run two expanding folds (validation + test). Default is a single held-out test fold.",
+    )
+    args = parser.parse_args()
+    n_splits = 2 if args.use_validation_split else 1
+
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
     from data import get_data_for_har
@@ -520,6 +530,7 @@ def main():
     tickers = list(data_dict.keys())
     graph_n_jobs = max(1, min(24, (os.cpu_count() or 1) - 1))
     print(f"Using {graph_n_jobs} worker processes for graph builds.")
+    print(f"Using {n_splits} expanding-window fold(s) for evaluation.")
 
     # ── Offline graph build ──────────────────────────────────────────────────
     # One SquaredCorrelationNetwork per k value, built ONCE on the full dataset.
@@ -527,105 +538,129 @@ def main():
     # so fitting on the full history does NOT introduce look-ahead leakage.
     print("\nBuilding correlation-network features offline (k=1..5)...")
     from models.correlation_network import SquaredCorrelationNetwork, PartialCorrelationNetwork, MutualInformationNetwork
+    from data.graph_cache import save_graph_data, load_graph_data, graph_cache_exists
     KNN_VALUES = [1, 2, 3, 4, 5]
-    nets: dict = {}
-    data_dicts_net: dict = {}
-    for k_val in KNN_VALUES:
-        net_k = SquaredCorrelationNetwork(
-            window=60,
-            step=1,
-            save_step=5,
-            n_jobs=graph_n_jobs,
-            graph_type="knn",
-            k=k_val,
-            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
-        )
-        data_dicts_net[k_val] = net_k.fit_transform(data_dict)
-        nets[k_val] = net_k
-        print(f"  [SqCorr] k={k_val}: {net_k.n_all_snapshots_} total graphs, {net_k.n_snapshots_} saved.")
-    # Save graph snapshots for interpretability
-    print("\nSaving graph snapshots...")
     GRAPHS_DIR = RESULTS_DIR / "graphs"
     FEATURES_DIR = RESULTS_DIR / "feature_snapshots"
-    for k_val in KNN_VALUES:
-        save_graph_snapshots(nets[k_val], GRAPHS_DIR, f"sqcorr_k{k_val}")
-        save_feature_snapshots(
-            data_dicts_net[k_val], FEATURES_DIR, f"sqcorr_k{k_val}",
-            tickers=SAMPLE_TICKERS,
-        )
+    CACHE_DIR = RESULTS_DIR / "graph_cache"
+    cache_loaded = all(graph_cache_exists(CACHE_DIR, tag, KNN_VALUES) for tag in ("sqcorr", "pcorr", "exp", "mi"))
 
-    print("\nBuilding partial-correlation network features offline (k=1..5)...")
-    nets_pcorr: dict = {}
-    data_dicts_pcorr: dict = {}
-    for k_val in KNN_VALUES:
-        net_pk = PartialCorrelationNetwork(
-            window=60,
-            step=1,
-            save_step=5,
-            n_jobs=graph_n_jobs,
-            graph_type="knn",
-            k=k_val,
-            shrinkage=0.1,
-            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
-        )
-        data_dicts_pcorr[k_val] = net_pk.fit_transform(data_dict)
-        nets_pcorr[k_val] = net_pk
-        print(f"  [PCorr]  k={k_val}: {net_pk.n_all_snapshots_} total graphs, {net_pk.n_snapshots_} saved.")
+    if cache_loaded:
+        print("\nLoading cached graph features from previous regression run...")
+        data_dicts_net, nets = load_graph_data(CACHE_DIR, "sqcorr", KNN_VALUES)
+        data_dicts_pcorr, nets_pcorr = load_graph_data(CACHE_DIR, "pcorr", KNN_VALUES)
+        data_dicts_exp, nets_exp = load_graph_data(CACHE_DIR, "exp", KNN_VALUES)
+        data_dicts_mi, nets_mi = load_graph_data(CACHE_DIR, "mi", KNN_VALUES)
+        print("  Graph cache loaded — skipping expensive fit_transform.")
+    else:
+        nets: dict = {}
+        data_dicts_net: dict = {}
+        for k_val in KNN_VALUES:
+            net_k = SquaredCorrelationNetwork(
+                window=60,
+                step=1,
+                save_step=5,
+                n_jobs=graph_n_jobs,
+                graph_type="knn",
+                k=k_val,
+                feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
+            )
+            data_dicts_net[k_val] = net_k.fit_transform(data_dict)
+            nets[k_val] = net_k
+            print(f"  [SqCorr] k={k_val}: {net_k.n_all_snapshots_} total graphs, {net_k.n_snapshots_} saved.")
 
-    for k_val in KNN_VALUES:
-        save_graph_snapshots(nets_pcorr[k_val], GRAPHS_DIR, f"pcorr_k{k_val}")
-        save_feature_snapshots(
-            data_dicts_pcorr[k_val], FEATURES_DIR, f"pcorr_k{k_val}",
-            tickers=SAMPLE_TICKERS,
-        )
+        print("\nBuilding partial-correlation network features offline (k=1..5)...")
+        nets_pcorr: dict = {}
+        data_dicts_pcorr: dict = {}
+        for k_val in KNN_VALUES:
+            net_pk = PartialCorrelationNetwork(
+                window=60,
+                step=1,
+                save_step=5,
+                n_jobs=graph_n_jobs,
+                graph_type="knn",
+                k=k_val,
+                shrinkage=0.1,
+                feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
+            )
+            data_dicts_pcorr[k_val] = net_pk.fit_transform(data_dict)
+            nets_pcorr[k_val] = net_pk
+            print(f"  [PCorr]  k={k_val}: {net_pk.n_all_snapshots_} total graphs, {net_pk.n_snapshots_} saved.")
 
-    # Exp-kernel: same SquaredCorrelationNetwork but with exp(-lambda*d) IDW
-    print("\nBuilding exp-kernel correlation-network features offline (k=1..5)...")
-    data_dicts_exp: dict = {}
-    for k_val in KNN_VALUES:
-        net_exp = SquaredCorrelationNetwork(
-            window=60,
-            step=1,
-            save_step=5,
-            n_jobs=graph_n_jobs,
-            graph_type="knn",
-            k=k_val,
-            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
-            idw_kernel="exp",
-            exp_lambda=5.0,
-        )
-        data_dicts_exp[k_val] = net_exp.fit_transform(data_dict)
-        print(f"  [ExpKernel] k={k_val}: {net_exp.n_all_snapshots_} total graphs, {net_exp.n_snapshots_} saved.")
-        save_feature_snapshots(
-            data_dicts_exp[k_val], FEATURES_DIR, f"expkernel_k{k_val}",
-            tickers=SAMPLE_TICKERS,
-        )
+        print("\nBuilding exp-kernel correlation-network features offline (k=1..5)...")
+        nets_exp: dict = {}
+        data_dicts_exp: dict = {}
+        for k_val in KNN_VALUES:
+            net_exp = SquaredCorrelationNetwork(
+                window=60,
+                step=1,
+                save_step=5,
+                n_jobs=graph_n_jobs,
+                graph_type="knn",
+                k=k_val,
+                feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
+                idw_kernel="exp",
+                exp_lambda=5.0,
+            )
+            data_dicts_exp[k_val] = net_exp.fit_transform(data_dict)
+            nets_exp[k_val] = net_exp
+            print(f"  [ExpKernel] k={k_val}: {net_exp.n_all_snapshots_} total graphs, {net_exp.n_snapshots_} saved.")
 
-    # ── Mutual-information network build ─────────────────────────────────────
-    print("\nBuilding mutual-information networks (k=1..5)...")
-    nets_mi: dict = {}
-    data_dicts_mi: dict = {}
-    for k_val in KNN_VALUES:
-        net_mi = MutualInformationNetwork(
-            window=60,
-            step=1,
-            save_step=5,
-            n_jobs=graph_n_jobs,
-            graph_type="knn",
-            k=k_val,
-            n_bins=10,
-            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
-        )
-        data_dicts_mi[k_val] = net_mi.fit_transform(data_dict)
-        nets_mi[k_val] = net_mi
-        print(f"  [MI]     k={k_val}: {net_mi.n_all_snapshots_} total graphs, {net_mi.n_snapshots_} saved.")
+        print("\nBuilding mutual-information networks (k=1..5)...")
+        nets_mi: dict = {}
+        data_dicts_mi: dict = {}
+        for k_val in KNN_VALUES:
+            net_mi = MutualInformationNetwork(
+                window=60,
+                step=1,
+                save_step=5,
+                n_jobs=graph_n_jobs,
+                graph_type="knn",
+                k=k_val,
+                n_bins=10,
+                feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
+            )
+            data_dicts_mi[k_val] = net_mi.fit_transform(data_dict)
+            nets_mi[k_val] = net_mi
+            print(f"  [MI]     k={k_val}: {net_mi.n_all_snapshots_} total graphs, {net_mi.n_snapshots_} saved.")
 
-    for k_val in KNN_VALUES:
-        save_graph_snapshots(nets_mi[k_val], GRAPHS_DIR, f"mi_k{k_val}")
-        save_feature_snapshots(
-            data_dicts_mi[k_val], FEATURES_DIR, f"mi_k{k_val}",
-            tickers=SAMPLE_TICKERS,
-        )
+        print("\nSaving graph cache for reuse by classification...")
+        save_graph_data(data_dicts_net, nets, CACHE_DIR, "sqcorr")
+        save_graph_data(data_dicts_pcorr, nets_pcorr, CACHE_DIR, "pcorr")
+        save_graph_data(data_dicts_exp, nets_exp, CACHE_DIR, "exp")
+        save_graph_data(data_dicts_mi, nets_mi, CACHE_DIR, "mi")
+        print("  Graph cache saved to", CACHE_DIR)
+
+    if cache_loaded:
+        print("\nSkipping graph snapshot export; cached regression artifacts already exist.")
+    else:
+        print("\nSaving graph snapshots...")
+        for k_val in KNN_VALUES:
+            save_graph_snapshots(nets[k_val], GRAPHS_DIR, f"sqcorr_k{k_val}")
+            save_feature_snapshots(
+                data_dicts_net[k_val], FEATURES_DIR, f"sqcorr_k{k_val}",
+                tickers=SAMPLE_TICKERS,
+            )
+
+        for k_val in KNN_VALUES:
+            save_graph_snapshots(nets_pcorr[k_val], GRAPHS_DIR, f"pcorr_k{k_val}")
+            save_feature_snapshots(
+                data_dicts_pcorr[k_val], FEATURES_DIR, f"pcorr_k{k_val}",
+                tickers=SAMPLE_TICKERS,
+            )
+
+        for k_val in KNN_VALUES:
+            save_feature_snapshots(
+                data_dicts_exp[k_val], FEATURES_DIR, f"expkernel_k{k_val}",
+                tickers=SAMPLE_TICKERS,
+            )
+
+        for k_val in KNN_VALUES:
+            save_graph_snapshots(nets_mi[k_val], GRAPHS_DIR, f"mi_k{k_val}")
+            save_feature_snapshots(
+                data_dicts_mi[k_val], FEATURES_DIR, f"mi_k{k_val}",
+                tickers=SAMPLE_TICKERS,
+            )
 
     # ── Model catalogue (category -> model dict) ─────────────────────────────
     # Each value is {model_display_name: (model_instance, strip_outliers_bool)}.
@@ -828,7 +863,7 @@ def main():
         data_dict,
         baseline_catalogue,
         tickers,
-        n_splits=2,
+        n_splits=n_splits,
         sample_tickers=SAMPLE_TICKERS,
         save_params=True,
     )
@@ -846,7 +881,7 @@ def main():
             dd_net,
             net_catalogue,
             net_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -871,7 +906,7 @@ def main():
             dd_pc,
             pcorr_catalogue,
             pc_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -896,7 +931,7 @@ def main():
             dd_exp,
             exp_catalogue,
             exp_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -921,7 +956,7 @@ def main():
             dd_sq,
             clust_catalogue,
             sq_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -946,7 +981,7 @@ def main():
             dd_mi,
             mi_catalogue,
             mi_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -971,7 +1006,7 @@ def main():
             dd_exp,
             expc_catalogue,
             expc_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -996,7 +1031,7 @@ def main():
             dd_sq,
             split_catalogue,
             split_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -1020,7 +1055,7 @@ def main():
             dd_exp,
             splitc_catalogue,
             splitc_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -1044,7 +1079,7 @@ def main():
             dd_pc,
             pcorr_split_catalogue,
             pcorr_split_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -1068,7 +1103,7 @@ def main():
             dd_exp,
             exp_split_catalogue,
             exp_split_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -1092,7 +1127,7 @@ def main():
             dd_mi,
             mi_split_catalogue,
             mi_split_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -1119,7 +1154,7 @@ def main():
             dd_sq,
             lw_catalogue,
             lw_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -1146,7 +1181,7 @@ def main():
             dd_pc,
             lw_pc_catalogue,
             lw_pc_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -1173,7 +1208,7 @@ def main():
             dd_mi,
             lw_mi_catalogue,
             lw_mi_tickers,
-            n_splits=2,
+            n_splits=n_splits,
             sample_tickers=SAMPLE_TICKERS,
             save_params=True,
         )
@@ -1198,7 +1233,7 @@ def main():
         lwc_tickers = list(dd_sq.keys())
         metrics_lwc, pred_store_lwc, params_lwc = cross_val_multi(
             dd_sq, lwc_catalogue, lwc_tickers,
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, save_params=True,
+            n_splits=n_splits, sample_tickers=SAMPLE_TICKERS, save_params=True,
         )
         all_net_metrics.append(metrics_lwc)
         all_params.extend(params_lwc)
@@ -1221,7 +1256,7 @@ def main():
         lwc_pc_tickers = list(dd_pc.keys())
         metrics_lwcp, pred_store_lwcp, params_lwcp = cross_val_multi(
             dd_pc, lwc_pc_catalogue, lwc_pc_tickers,
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, save_params=True,
+            n_splits=n_splits, sample_tickers=SAMPLE_TICKERS, save_params=True,
         )
         all_net_metrics.append(metrics_lwcp)
         all_params.extend(params_lwcp)
@@ -1244,7 +1279,7 @@ def main():
         lwc_mi_tickers = list(dd_mi.keys())
         metrics_lwcm, pred_store_lwcm, params_lwcm = cross_val_multi(
             dd_mi, lwc_mi_catalogue, lwc_mi_tickers,
-            n_splits=2, sample_tickers=SAMPLE_TICKERS, save_params=True,
+            n_splits=n_splits, sample_tickers=SAMPLE_TICKERS, save_params=True,
         )
         all_net_metrics.append(metrics_lwcm)
         all_params.extend(params_lwcm)
@@ -1265,38 +1300,43 @@ def main():
     # Coalesce k-variants into super-categories for printing/plotting
     metrics_coalesced = coalesce_categories(metrics_df)
 
-    # ── Validation / Test split reporting ─────────────────────────────────────
-    # Fold 1 = validation (earlier year), Fold 0 = test (most recent year).
-    # Select best model per category on the validation fold, then report
-    # performance of those models on the held-out test fold.
-    print("\n" + "=" * 80)
-    print("VALIDATION-FOLD SUMMARY  (Fold 1 — used for model selection)")
-    print("=" * 80)
-    val_metrics = metrics_coalesced[metrics_coalesced["Fold"] == 1]
-    val_summary = summarize_benchmarks(val_metrics)
-    print_summary(val_summary, title="Validation Summary (all models)")
-    print_best_per_category(val_summary)
+    if n_splits > 1:
+        print("\n" + "=" * 80)
+        print("VALIDATION-FOLD SUMMARY  (Fold 1 — used for model selection)")
+        print("=" * 80)
+        val_metrics = metrics_coalesced[metrics_coalesced["Fold"] == 1]
+        val_summary = summarize_benchmarks(val_metrics)
+        print_summary(val_summary, title="Validation Summary (all models)")
+        print_best_per_category(val_summary)
 
-    print("\n" + "=" * 80)
-    print("TEST-FOLD SUMMARY  (Fold 0 — held-out final evaluation)")
-    print("=" * 80)
-    test_metrics = metrics_coalesced[metrics_coalesced["Fold"] == 0]
-    test_summary = summarize_benchmarks(test_metrics)
-    print_summary(test_summary, title="Test Summary (all models)")
-    print_best_per_category(test_summary)
+        print("\n" + "=" * 80)
+        print("TEST-FOLD SUMMARY  (Fold 0 — held-out final evaluation)")
+        print("=" * 80)
+        test_metrics = metrics_coalesced[metrics_coalesced["Fold"] == 0]
+        test_summary = summarize_benchmarks(test_metrics)
+        print_summary(test_summary, title="Test Summary (all models)")
+        print_best_per_category(test_summary)
 
-    # ── Best-model selection on validation, reported on test ─────────────────
-    best_models = select_best_on_validation(metrics_coalesced, val_fold=1)
-    print("\n" + "=" * 80)
-    print("BEST MODEL PER CATEGORY  (chosen on validation fold)")
-    print("=" * 80)
-    print(best_models.to_string(index=False))
+        best_models = select_best_on_validation(metrics_coalesced, val_fold=1)
+        print("\n" + "=" * 80)
+        print("BEST MODEL PER CATEGORY  (chosen on validation fold)")
+        print("=" * 80)
+        print(best_models.to_string(index=False))
+        print_best_test_summary(metrics_coalesced, best_models, test_fold=0)
+        summary = summarize_benchmarks(metrics_coalesced)
+        summary_title = "Full Summary — both folds (all stocks)"
+    else:
+        print("\n" + "=" * 80)
+        print("TEST SUMMARY  (Fold 0 — held-out final evaluation)")
+        print("=" * 80)
+        test_metrics = metrics_coalesced[metrics_coalesced["Fold"] == 0]
+        test_summary = summarize_benchmarks(test_metrics)
+        print_summary(test_summary, title="Test Summary (all models)")
+        print_best_per_category(test_summary)
+        summary = summarize_benchmarks(metrics_coalesced)
+        summary_title = "Summary — single hold-out fold (all stocks)"
 
-    print_best_test_summary(metrics_coalesced, best_models, test_fold=0)
-
-    # ── Legacy full-summary (both folds averaged) for reference ──────────────
-    summary = summarize_benchmarks(metrics_coalesced)
-    print_summary(summary, title="Full Summary — both folds (all stocks)")
+    print_summary(summary, title=summary_title)
     print_compact_leaderboard(summary)
     print_summary_excluding_outliers(metrics_coalesced, r2_threshold=-1.0)
     print_wilcoxon_best_network_vs_baseline(metrics_coalesced)

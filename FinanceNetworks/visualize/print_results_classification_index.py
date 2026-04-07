@@ -54,10 +54,16 @@ if __name__ == "__main__":
             "comparison tables (distance / weighting / structure)."
         ),
     )
+    parser.add_argument(
+        "--present-only",
+        action="store_true",
+        help="Print only the presentation-oriented classification report.",
+    )
     args = parser.parse_args()
     load_and_print_classification_results(
         results_dir=args.results_dir,
         sample_tickers=args.tickers,
         selection=args.selection,
         present=args.present,
+        present_only=args.present_only,
     )

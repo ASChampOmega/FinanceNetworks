@@ -12,7 +12,7 @@ print_best_per_category               : Print the single best model per category
 print_compact_leaderboard             : Ultra-short leaderboard (best per category).
 print_per_ticker_tables               : Print per-ticker metrics for sample tickers.
 print_per_ticker_network_vs_baseline  : Best-network vs best-baseline for each ticker.
-print_k_breakdown                     : k=1/3/5 side-by-side comparison.
+print_k_breakdown                     : Side-by-side comparison across all available k values.
 print_weighting_scheme_breakdown      : IDW vs Exp vs LearnedWeight comparison.
 print_wilcoxon_best_network_vs_baseline : Wilcoxon signed-rank test (network vs baseline).
 print_summary_excluding_outliers      : Reprint summary after dropping bad tickers.
@@ -543,7 +543,7 @@ def print_per_ticker_network_vs_baseline(
 
 
 # ---------------------------------------------------------------------------
-# k=1 / k=3 / k=5 breakdown
+# k breakdown
 # ---------------------------------------------------------------------------
 
 def print_k_breakdown(
@@ -551,7 +551,7 @@ def print_k_breakdown(
     use_log: bool = True,
 ) -> None:
     """Show, for each super-category with k-variants, the best model's key metrics
-    at k=1, k=3, k=5 in side-by-side columns.
+    at every available k value in side-by-side columns.
 
     Uses the pre-coalesce (raw/clipped) metrics DataFrame so all k values are present.
     """
@@ -601,20 +601,33 @@ def print_k_breakdown(
         return
 
     raw_df     = pd.DataFrame(rows)
+    k_values = sorted(raw_df["k"].unique())
+
     pivot_rmse = raw_df.pivot(index="SuperCategory", columns="k", values=f"mean_{rmse_col}")
+    pivot_rmse = pivot_rmse.reindex(columns=k_values)
     pivot_rmse.columns = [f"k{k}_{rmse_col}" for k in pivot_rmse.columns]
     pivot_r2   = raw_df.pivot(index="SuperCategory", columns="k", values=f"mean_{r2_col}")
+    pivot_r2   = pivot_r2.reindex(columns=k_values)
     pivot_r2.columns   = [f"k{k}_{r2_col}" for k in pivot_r2.columns]
     pivot_pct  = raw_df.pivot(index="SuperCategory", columns="k", values="pct_pos")
+    pivot_pct  = pivot_pct.reindex(columns=k_values)
     pivot_pct.columns  = [f"k{k}_%pos" for k in pivot_pct.columns]
 
     combined   = pd.concat([pivot_rmse, pivot_r2, pivot_pct], axis=1)
+    ordered_cols = (
+        [f"k{k}_{rmse_col}" for k in k_values]
+        + [f"k{k}_{r2_col}" for k in k_values]
+        + [f"k{k}_%pos" for k in k_values]
+    )
+    combined = combined.reindex(columns=ordered_cols)
     first_rmse = [c for c in combined.columns if rmse_col in c]
     if first_rmse:
         combined = combined.sort_values(first_rmse[0], ascending=True, na_position="last")
 
+    k_label = ", ".join(str(k) for k in k_values)
+
     print(f"\n{'=' * 80}")
-    print(f"  k=1 / k=3 / k=5 Breakdown  ({metric_label})")
+    print(f"  k = {k_label} Breakdown  ({metric_label})")
     print(f"{'=' * 80}")
     with pd.option_context(
         "display.float_format", "{:.4f}".format,
@@ -1072,6 +1085,22 @@ def print_presentation_tables(
     )
 
 
+def print_presentation_report(
+    metrics_df_raw: pd.DataFrame,
+    metrics_df: pd.DataFrame,
+    use_log: bool = True,
+    named_tickers: "Optional[List[str]]" = None,
+) -> None:
+    """Print the concise regression report used for presentation logs."""
+    print_k_breakdown(metrics_df_raw, use_log=use_log)
+    print_weighting_scheme_breakdown(metrics_df, use_log=use_log)
+    print_presentation_tables(
+        metrics_df,
+        use_log=use_log,
+        named_tickers=named_tickers,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Load-from-disk entry point
 # ---------------------------------------------------------------------------
@@ -1084,6 +1113,7 @@ def load_and_print_results(
     use_log: bool = True,
     selection: str = "r2",
     present: bool = False,
+    present_only: bool = False,
     raw_metric_display_scale: float = 1.0,
     raw_metric_display_label: str | None = None,
 ) -> None:
@@ -1154,24 +1184,32 @@ def load_and_print_results(
     # Step 3: build summary (also filters degenerate models)
     summary = summarize_benchmarks(metrics_df, use_log=use_log, selection=selection)
 
-    print_summary(summary, title=f"Full Summary ({metric_label})")
-    print_best_per_category(summary, use_log=use_log, selection=selection)
-    print_compact_leaderboard(summary, use_log=use_log, selection=selection)
+    if present_only:
+        print_presentation_report(
+            metrics_df_raw,
+            metrics_df,
+            use_log=use_log,
+            named_tickers=sample_tickers,
+        )
+    else:
+        print_summary(summary, title=f"Full Summary ({metric_label})")
+        print_best_per_category(summary, use_log=use_log, selection=selection)
+        print_compact_leaderboard(summary, use_log=use_log, selection=selection)
 
-    # Network vs baseline comparisons
-    print_wilcoxon_best_network_vs_baseline(metrics_df, use_log=use_log)
+        # Network vs baseline comparisons
+        print_wilcoxon_best_network_vs_baseline(metrics_df, use_log=use_log)
 
-    # Per-ticker breakdowns
-    print_per_ticker_network_vs_baseline(metrics_df, sample_tickers, use_log=use_log)
-    print_per_ticker_tables(metrics_df, sample_tickers, use_log=use_log, selection=selection)
+        # Per-ticker breakdowns
+        print_per_ticker_network_vs_baseline(metrics_df, sample_tickers, use_log=use_log)
+        print_per_ticker_tables(metrics_df, sample_tickers, use_log=use_log, selection=selection)
 
-    # Structural breakdowns (k-breakdown uses pre-coalesce data)
-    print_k_breakdown(metrics_df_raw, use_log=use_log)
-    print_weighting_scheme_breakdown(metrics_df, use_log=use_log)
+        # Structural breakdowns (k-breakdown uses pre-coalesce data)
+        print_k_breakdown(metrics_df_raw, use_log=use_log)
+        print_weighting_scheme_breakdown(metrics_df, use_log=use_log)
 
-    if present:
-        print_presentation_tables(metrics_df, use_log=use_log, selection=selection,
-                                  named_tickers=sample_tickers)
+        if present:
+            print_presentation_tables(metrics_df, use_log=use_log, selection=selection,
+                                      named_tickers=sample_tickers)
 
     print(f"\n  (Loaded {len(metrics_df_raw)} rows from {raw_path})")
 
@@ -1234,6 +1272,14 @@ if __name__ == "__main__":
             "comparison tables (distance / weighting / structure)."
         ),
     )
+    parser.add_argument(
+        "--present-only",
+        action="store_true",
+        help=(
+            "Print only the presentation-oriented regression report: k breakdown, "
+            "weighting-scheme breakdown, Wilcoxon, and all presentation tables."
+        ),
+    )
     args = parser.parse_args()
     load_and_print_results(
         results_dir=args.results_dir,
@@ -1242,4 +1288,5 @@ if __name__ == "__main__":
         use_log=(args.metric == "log"),
         selection=args.selection,
         present=args.present,
+        present_only=args.present_only,
     )
