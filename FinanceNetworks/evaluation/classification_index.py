@@ -711,5 +711,115 @@ def main() -> None:
     print_weighting_scheme_breakdown_clf(metrics_coalesced)
 
 
+def sanity() -> None:
+    """
+    Fast smoke-test entry point for the index classification pipeline.
+
+    Runs one model per baseline family + two network models (NetHAR, NetVAR)
+    on a single SqCorr graph at k=3, using all 21 index tickers.  Intended
+    to verify the full pipeline works without committing to a multi-hour run.
+
+    To restore the full experiment, replace the ``sanity()`` call in the
+    ``__main__`` block below with ``main()``.
+    """
+    SAMPLE_TICKERS = ["SPX2", "FTSE2", "N2252", "GDAXI2", "IXIC2"]
+    RESULTS_DIR = Path(__file__).parent.parent / "results" / "index_results"
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    K_VAL = 3
+    INDEX_SPIKE_QUANTILE = 0.75
+    INDEX_SPIKE_LOOKBACK = 252 * 3
+
+    graph_n_jobs = max(1, min(8, (os.cpu_count() or 1) - 1))
+    cv_n_jobs = max(1, min(24, (os.cpu_count() or 1) - 1))
+
+    print("Loading and preprocessing index data...")
+    data_dict = get_index_data_for_har()
+    tickers = list(data_dict.keys())
+    print(f"  {len(tickers)} indices — sanity mode (1 model/family, SqCorr k={K_VAL} only)")
+
+    # ── Graph: reuse cached SqCorr from index regression run if available ────
+    from data.graph_cache import load_graph_data, graph_cache_exists
+    CACHE_DIR = RESULTS_DIR / "graph_cache"
+    cache_loaded = False
+    if graph_cache_exists(CACHE_DIR, "sqcorr", [K_VAL]):
+        print(f"\nLoading cached SqCorr graph features (k={K_VAL})...")
+        data_dicts_net, _ = load_graph_data(CACHE_DIR, "sqcorr", [K_VAL])
+        cache_loaded = True
+        print("  Graph cache loaded.")
+    else:
+        print(f"\nBuilding SqCorr graph (k={K_VAL}) from scratch...")
+        net = SquaredCorrelationNetwork(
+            window=60, step=1, save_step=5, n_jobs=graph_n_jobs,
+            graph_type="knn", k=K_VAL,
+            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
+        )
+        data_dicts_net = {K_VAL: net.fit_transform(data_dict)}
+        print(f"  [SqCorr] k={K_VAL}: {net.n_all_snapshots_} total, {net.n_snapshots_} saved.")
+
+    # ── Slim baseline catalogue: 1 entry per family ──────────────────────────
+    baseline_catalogue: Dict[str, Dict[str, Any]] = {
+        "HAR-Logit": {
+            "HAR-Logit (C=1.0)":      (HARLogitClassifier(C=1.0, use_market=False),              False),
+        },
+        "HAR-Ext-Logit": {
+            "HAR-Ext-Logit (C=1.0)":  (HARExtendedLogitClassifier(C=1.0, use_market=False),      False),
+        },
+        "RegimeSwitching-Logit": {
+            "RegHAR-Logit (p50)":     (RegimeSwitchingHARLogitClassifier(regime_percentile=0.5,
+                                                                          use_market=False),       False),
+        },
+        "DCC-GARCH-Logit": {
+            "DCC-GARCH-Logit (C=1.0)":(DCCGARCHSpikeClassifier(C=1.0, aux_returns_col=None,
+                                                                 returns_multiplier=100.0),       False),
+        },
+    }
+
+    print(f"\nRunning baseline classifiers on {len(tickers)} indices...")
+    metrics_df, pred_store, all_params = classification_cv_multi(
+        data_dict, baseline_catalogue, tickers,
+        n_splits=1,
+        sample_tickers=SAMPLE_TICKERS,
+        spike_quantile=INDEX_SPIKE_QUANTILE,
+        spike_lookback=INDEX_SPIKE_LOOKBACK,
+        save_params=True,
+        num_workers=cv_n_jobs,
+    )
+
+    # ── Single SqCorr network run at k=3 ─────────────────────────────────────
+    net_catalogue: Dict[str, Dict[str, Any]] = {
+        f"Network [k={K_VAL}]": {
+            "NetHAR-Logit (C=1.0)":         (NetworkHARClassifier(C=1.0, use_market=False),     False),
+            "NetVAR-Logit (C=1,a=0.1,b=1)": (NetworkVARClassifier(C_stage1=1.0, stage2_alpha=0.1,
+                                                                    correction_bound=1.0,
+                                                                    use_market=False),            False),
+        },
+    }
+    dd_net = data_dicts_net[K_VAL]
+    print(f"\nRunning network classifiers (SqCorr, k={K_VAL})...")
+    m_net, ps_net, params_net = classification_cv_multi(
+        dd_net, net_catalogue, list(dd_net.keys()),
+        n_splits=1,
+        sample_tickers=SAMPLE_TICKERS,
+        spike_quantile=INDEX_SPIKE_QUANTILE,
+        spike_lookback=INDEX_SPIKE_LOOKBACK,
+        save_params=True,
+        num_workers=cv_n_jobs,
+    )
+    _merge_clf_pred_store(pred_store, ps_net)
+    all_params.extend(params_net)
+
+    # ── Aggregate and save ────────────────────────────────────────────────────
+    metrics_df = pd.concat([metrics_df, m_net], ignore_index=True)
+    summary = summarize_classification(metrics_df)
+    save_classification_results(metrics_df, summary, RESULTS_DIR)
+    save_model_params(all_params, RESULTS_DIR, "classification_model_params.json")
+    save_classification_prediction_store(pred_store, RESULTS_DIR)
+
+    print_classification_summary(summary, title="Index Classification (sanity — 1 model/family, SqCorr k=3)")
+    print_best_classifier(summary)
+    print_compact_clf_leaderboard(summary)
+
+
 if __name__ == "__main__":
+    # sanity()
     main()
