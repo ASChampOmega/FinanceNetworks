@@ -92,6 +92,82 @@ def _merge_pred_store(
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+def sanity() -> None:
+    """
+    Fast smoke-test for the index regression pipeline.
+
+    Builds (or loads) a SqCorr graph at k=3, runs one HAR baseline and one
+    NetHAR model on all 21 indices, saves results, and prints a brief summary.
+    Intended as a quick e2e check before committing to a full run.
+    """
+    SAMPLE_TICKERS = ["SPX2", "FTSE2", "N2252", "GDAXI2", "IXIC2"]
+    RESULTS_DIR = Path(__file__).parent.parent / "results" / "index_results"
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    K_VAL = 3
+
+    graph_n_jobs = max(1, min(8, (os.cpu_count() or 1) - 1))
+
+    print("Loading and preprocessing Oxford-Man index data...")
+    data_dict = get_index_data_for_har()
+    tickers = list(data_dict.keys())
+    print(f"  {len(tickers)} indices — sanity mode (HAR + NetHAR, SqCorr k={K_VAL} only)")
+
+    from data.graph_cache import save_graph_data, load_graph_data, graph_cache_exists
+    CACHE_DIR = RESULTS_DIR / "graph_cache"
+
+    if graph_cache_exists(CACHE_DIR, "sqcorr", [K_VAL]):
+        data_dicts_net, nets_sq = load_graph_data(CACHE_DIR, "sqcorr", [K_VAL])
+        print("  [SqCorr] k=3: loaded from cache.")
+    else:
+        net_k = SquaredCorrelationNetwork(
+            window=60, step=1, save_step=5, n_jobs=graph_n_jobs,
+            graph_type="knn", k=K_VAL,
+            feature_cols=["log_RV1", "log_RV5", "log_RV22", "Returns"],
+        )
+        data_dicts_net = {K_VAL: net_k.fit_transform(data_dict)}
+        nets_sq = {K_VAL: net_k}
+        print(f"  [SqCorr] k={K_VAL}: {net_k.n_all_snapshots_} total, {net_k.n_snapshots_} saved.")
+        save_graph_data(data_dicts_net, nets_sq, CACHE_DIR, "sqcorr")
+        print("  Graph cache saved to", CACHE_DIR)
+
+    baseline_catalogue: Dict[str, Dict[str, Any]] = {
+        "HAR": {
+            "HAR":            (HARLogRegressor(use_market=False),          False),
+            "HAR-Extended":   (HARExtendedLogRegressor(use_market=False),  False),
+        },
+    }
+
+    print(f"\nRunning baseline models on {len(tickers)} indices...")
+    metrics_df, pred_store, all_params = cross_val_multi(
+        data_dict, baseline_catalogue, tickers,
+        n_splits=1, sample_tickers=SAMPLE_TICKERS, save_params=True,
+    )
+
+    net_catalogue: Dict[str, Dict[str, Any]] = {
+        f"Network [k={K_VAL}]": {
+            "NetHAR (Lasso a=0.05)": (NetworkHARRegressor(lasso_alpha=0.05, use_market=False), False),
+            "NetworkVAR (a=0.1, b=1.0)": (NetworkVARRegressor(stage2_alpha=0.1, correction_bound=1.0, use_market=False), False),
+        },
+    }
+    dd_net = data_dicts_net[K_VAL]
+    print(f"\nRunning network models (SqCorr, k={K_VAL})...")
+    metrics_net, pred_store_net, params_net = cross_val_multi(
+        dd_net, net_catalogue, list(dd_net.keys()),
+        n_splits=1, sample_tickers=SAMPLE_TICKERS, save_params=True,
+    )
+    _merge_pred_store(pred_store, pred_store_net)
+    all_params.extend(params_net)
+
+    metrics_df = pd.concat([metrics_df, metrics_net], ignore_index=True)
+    summary = summarize_benchmarks(metrics_df)
+    save_results(metrics_df, summary, RESULTS_DIR)
+    save_model_params(all_params, RESULTS_DIR, "regression_model_params.json")
+    save_prediction_store(pred_store, RESULTS_DIR)
+
+    print_summary(summary, title="Index Regression (sanity — HAR + NetHAR, SqCorr k=3)")
+    print_compact_leaderboard(summary)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Index regression evaluation")
     parser.add_argument(
@@ -683,4 +759,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # sanity()
     main()

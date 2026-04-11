@@ -91,12 +91,12 @@ def _merge_clf_pred_store(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Index classification evaluation")
     parser.add_argument(
-        "--use-validation-split",
+        "--single-fold",
         action="store_true",
         help="Run two expanding folds (validation + test). Default is a single held-out test fold.",
     )
     args = parser.parse_args()
-    n_splits = 2 if args.use_validation_split else 1
+    n_splits = 1 if args.single_fold else 2
 
     SAMPLE_TICKERS = ["SPX2", "FTSE2", "N2252", "GDAXI2", "IXIC2"]
     RESULTS_DIR = Path(__file__).parent.parent / "results" / "index_results"

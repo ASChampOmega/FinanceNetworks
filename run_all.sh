@@ -17,6 +17,16 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
+SINGLE_FOLD_FLAG=()
+OTHER_ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == "--single-fold" ]]; then
+        SINGLE_FOLD_FLAG=("--single-fold")
+    else
+        OTHER_ARGS+=("$arg")
+    fi
+done
+
 echo "========================================"
 echo " run_all.sh — Full experiment pipeline"
 echo "========================================"
@@ -24,22 +34,22 @@ echo "========================================"
 # ── 1. Stock regression (builds + caches graphs) ────────────────────────────
 echo ""
 echo "[1/4] Stock regression ..."
-bash "$REPO_ROOT/run_stock_regression.sh" "$@"
+bash "$REPO_ROOT/run_stock_regression.sh" "${OTHER_ARGS[@]+${OTHER_ARGS[@]}}"
 
 # ── 2. Stock classification (loads cached graphs) ───────────────────────────
 echo ""
 echo "[2/4] Stock classification ..."
-bash "$REPO_ROOT/run_stock_classification.sh" "$@"
+bash "$REPO_ROOT/run_stock_classification.sh" "${OTHER_ARGS[@]+${OTHER_ARGS[@]}}"
 
 # ── 3. Index regression (builds + caches graphs) ────────────────────────────
 echo ""
 echo "[3/4] Index regression ..."
-bash "$REPO_ROOT/run_index_regression.sh" "$@"
+bash "$REPO_ROOT/run_index_regression.sh" "${OTHER_ARGS[@]+${OTHER_ARGS[@]}}"
 
 # ── 4. Index classification (loads cached graphs) ───────────────────────────
 echo ""
 echo "[4/4] Index classification ..."
-bash "$REPO_ROOT/run_index_classification.sh" "$@"
+bash "$REPO_ROOT/run_index_classification.sh" "${OTHER_ARGS[@]+${OTHER_ARGS[@]}}" "${SINGLE_FOLD_FLAG[@]+${SINGLE_FOLD_FLAG[@]}}"
 
 echo ""
 echo "========================================"

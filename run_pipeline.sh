@@ -45,6 +45,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_INSTALL=1
             shift
             ;;
+        --single-fold)
+            PASSTHROUGH_ARGS+=("--single-fold")
+            shift
+            ;;
         *)
             PASSTHROUGH_ARGS+=("$1")
             shift
