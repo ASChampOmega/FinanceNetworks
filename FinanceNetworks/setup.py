@@ -4,7 +4,7 @@ setup(
     name='FinanceNetworks',
     version='0.2.0',
     author='Aaryam Sharma',
-    description='A project for ECON 423 Final Project on Finance Networks',
+    description='Volatility forecasting with network-augmented econometric models',
     packages=find_packages(),
     install_requires=[
         'numpy>=2.4.3',

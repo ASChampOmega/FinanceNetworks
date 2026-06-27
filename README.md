@@ -1,6 +1,6 @@
 # Volatility Forecasting with Financial Networks
 
-**ECON 423 Final Project — Aaryam Sharma**
+**Aaryam Sharma**
 
 This project forecasts stock and index volatility using network-augmented
 econometric models.  It builds correlation networks from rolling windows of
@@ -57,14 +57,14 @@ classical HAR and GARCH baselines?
 | Dataset | Universe | Source | RV Measure |
 |---------|----------|--------|------------|
 | **Stock** | Top 100 S&P 500 stocks | Yahoo Finance (daily OHLCV) | Squared daily log-returns |
-| **Index** | 21 global equity indices | Custom dataset (provided by course instructor, not publicly available) | 5-minute realized variance |
+| **Index** | 21 global equity indices | Oxford-Man Institute Realized Library (not publicly available) | 5-minute realized variance |
 
 ---
 
 ## Project Structure
 
 ```
-Econ423-FinalProject/
+FinanceNetworks/
 │
 ├── run_pipeline.sh              # ★ Master script — runs everything
 ├── download_data.sh             # Downloads stock data via yfinance
@@ -166,8 +166,8 @@ arch, tqdm, statsmodels, networkx.
 ### 3. Prepare data
 
 The stock data is downloaded automatically from Yahoo Finance.  The index
-dataset (`OxfordManRealizedVolatilityIndices.csv`) was provided by the course
-instructor and is **not publicly available** — place it manually at:
+dataset (`OxfordManRealizedVolatilityIndices.csv`) was provided by Professor
+Dinghai Xu and is **not publicly available** — place it manually at:
 
 ```
 FinanceNetworks/data/data_files/OxfordManRealizedVolatilityIndices.csv
@@ -220,7 +220,7 @@ bash run_pipeline.sh --skip-download
 
 ### Index Dataset (21 Global Indices)
 
-- **Source**: Custom dataset provided by the course instructor (not publicly available)
+- **Source**: Dataset provided by Professor Dinghai Xu (not publicly available)
 - **Indices**: SPX2, FTSE2, N2252, GDAXI2, RUT2, AORD2, DJI2, IXIC2,
   FCHI2, HSI2, KS11, AEX, SSMI, IBEX2, NSEI, MXX, BVSP, GSPTSE,
   STOXX50E, FTSTI, FTSEMIB

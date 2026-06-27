@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_all.sh — Master script for the Econ423 FinanceNetworks project.
+# run_all.sh — Master script for the FinanceNetworks project.
 #
 # Runs all 4 experiments in order.  Regression scripts run first so that
 # their graph caches are available for the classification scripts (which
